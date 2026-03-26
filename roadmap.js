@@ -24,7 +24,7 @@ const MANIFEST_HANDLE_STORE = "handles";
 const MANIFEST_HANDLE_KEY = "versions-directory-handle";
 
 const appState = {
-  baseData: window.roadmapData,
+  baseData: null,
   activeManifest: null,
   rowContexts: [],
   boardBounds: null,
@@ -912,6 +912,23 @@ function render(data, options = {}) {
       visibleStartWeek,
       maxEndWeekExclusive: dataTotalWeeks
     };
+
+    function relayoutAllRowsIfCurrentRender() {
+      if (appState.rowContexts !== rowContexts) return;
+      for (const rowContext of rowContexts) {
+        relayoutCardsLayer(rowContext.cardsLayer, rowContext.row);
+      }
+    }
+
+    // Run follow-up relayout passes so stacked cards remain correct after
+    // async font/layout settling (common after loading a manifest).
+    window.requestAnimationFrame(() => {
+      relayoutAllRowsIfCurrentRender();
+      window.requestAnimationFrame(relayoutAllRowsIfCurrentRender);
+    });
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(relayoutAllRowsIfCurrentRender);
+    }
   } catch (err) {
     errorsEl.classList.remove("hidden");
     errorsEl.textContent = "Data validation/scheduling error: " + err.message;
@@ -1171,6 +1188,7 @@ function formatHistoryLabel(entry) {
 function updateManifestHistorySelect() {
   const select = getManifestHistorySelect();
   if (!select) return;
+  const previousValue = select.value;
   clearChildren(select);
   if (appState.manifestEntries.length === 0) {
     const option = document.createElement("option");
@@ -1184,6 +1202,12 @@ function updateManifestHistorySelect() {
     option.value = entry.name;
     option.textContent = formatHistoryLabel(entry);
     select.appendChild(option);
+  }
+  if (previousValue) {
+    const hasPreviousValue = appState.manifestEntries.some((entry) => entry.name === previousValue);
+    if (hasPreviousValue) {
+      select.value = previousValue;
+    }
   }
 }
 
@@ -1287,43 +1311,48 @@ async function refreshManifestEntries() {
 }
 
 async function saveManifestSnapshot() {
-  await ensureManifestDirectoryHandle();
-
   const currentManifest = createLayoutManifest(appState.baseData);
-  const nextVersion = appState.manifestEntries.reduce((maxVersion, entry) => {
-    return Math.max(maxVersion, parseManifestVersionNumber(entry.name));
-  }, 0) + 1;
-  const fileName = buildManifestFilename(nextVersion);
+  const response = await fetch("/api/manifests", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ manifest: currentManifest })
+  });
+  if (!response.ok) {
+    let message = `Failed to save manifest (${response.status})`;
+    try {
+      const payload = await response.json();
+      if (payload?.error) message = payload.error;
+    } catch (_) {
+      // Keep default message.
+    }
+    throw new Error(message);
+  }
+  const payload = await response.json();
+  const fileName = String(payload?.fileName || "");
+  const version = Number(payload?.version || 0);
+  if (!fileName || !Number.isFinite(version) || version <= 0) {
+    throw new Error("Save response was missing manifest metadata.");
+  }
   const text = JSON.stringify(currentManifest, null, 2);
-  const fileHandle = await appState.manifestDirectoryHandle.getFileHandle(fileName, { create: true });
-  const writer = await fileHandle.createWritable();
-  await writer.write(text);
-  await writer.close();
 
-  await refreshManifestEntries();
-  await writeManifestIndexToHandle();
   await refreshManifestEntries();
   setLastManifestLink(fileName, text);
-  setManifestStatus(`Saved manifest version v${String(nextVersion).padStart(4, "0")} as ${fileName}.`);
+  setManifestStatus(`Saved manifest version v${String(version).padStart(4, "0")} as ${fileName}.`);
   appState.activeManifest = currentManifest;
 }
 
 async function loadSelectedManifest() {
-  let entryCount = await refreshManifestEntries();
-  if (entryCount === 0) {
-    await restoreManifestDirectoryHandle();
-    entryCount = await refreshManifestEntries();
-  }
-  if (entryCount === 0 && supportsFolderManifestPersistence()) {
-    // Final fallback: ask once for folder access so loading can proceed.
-    await ensureManifestDirectoryHandle();
-    entryCount = await refreshManifestEntries();
-  }
   const select = getManifestHistorySelect();
-  if (!select || !select.value) {
-    throw new Error("No previous versions available to load.");
+  const selectedName = String(select?.value || "");
+  if (!selectedName) {
+    throw new Error("Select a manifest version first.");
   }
-  const selected = appState.manifestEntries.find((entry) => entry.name === select.value);
+
+  await refreshManifestEntries();
+
+  const selected = appState.manifestEntries.find((entry) => entry.name === selectedName);
   if (!selected) {
     throw new Error("Selected manifest was not found in versions.");
   }
@@ -1355,11 +1384,6 @@ function initManifestControls() {
   if (!saveBtn || !loadBtn || !resetBtn) return;
   if (saveBtn.dataset.bound === "true") return;
 
-  if (!supportsFolderManifestPersistence()) {
-    setManifestStatus("Save is unavailable in this browser. Load still works from versions.");
-    saveBtn.disabled = true;
-  }
-
   saveBtn.addEventListener("click", async () => {
     try {
       await saveManifestSnapshot();
@@ -1381,19 +1405,8 @@ function initManifestControls() {
   });
 
   (async () => {
-    const directLoadCount = await refreshManifestEntries();
-    const restored = await restoreManifestDirectoryHandle();
-    if (restored) {
-      await refreshManifestEntries();
-      return;
-    }
-    if (directLoadCount === 0 && isLocalFileProtocol()) {
-      setManifestStatus(`Local file mode blocks direct ${MANIFEST_FOLDER_NAME} reads. Load will ask once for access.`);
-      return;
-    }
-    if (supportsFolderManifestPersistence()) {
-      setManifestStatus(`Load uses ${MANIFEST_FOLDER_NAME} by default. Save asks for one-time access.`);
-    }
+    await refreshManifestEntries();
+    setManifestStatus(`Save/load uses ${MANIFEST_FOLDER_NAME} folder manifests.`);
   })();
   saveBtn.dataset.bound = "true";
 }
@@ -1429,6 +1442,25 @@ function initExportControls() {
   button.dataset.bound = "true";
 }
 
-render(appState.baseData);
-initManifestControls();
-initExportControls();
+function bootRoadmapApp(attempt = 0) {
+  if (window.roadmapData && typeof window.roadmapData === "object") {
+    appState.baseData = window.roadmapData;
+    render(appState.baseData);
+    initManifestControls();
+    initExportControls();
+    return;
+  }
+
+  if (attempt >= 100) {
+    const errorsEl = document.getElementById("errors");
+    if (errorsEl) {
+      errorsEl.classList.remove("hidden");
+      errorsEl.textContent = "Roadmap data failed to load. Please refresh the page.";
+    }
+    return;
+  }
+
+  window.setTimeout(() => bootRoadmapApp(attempt + 1), 50);
+}
+
+bootRoadmapApp();
