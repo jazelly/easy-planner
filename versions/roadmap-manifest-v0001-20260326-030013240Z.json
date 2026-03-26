@@ -1,0 +1,165 @@
+{
+  "schemaVersion": 1,
+  "savedAt": "2026-03-26T03:00:13.240Z",
+  "source": {
+    "startDate": "2026-04-13",
+    "taskCount": 24
+  },
+  "rows": [
+    {
+      "rowIndex": 0,
+      "cards": [
+        {
+          "taskId": "OKR-002-BA",
+          "startWeek": 0,
+          "order": 0
+        },
+        {
+          "taskId": "OKR-004-BA",
+          "startWeek": 4,
+          "order": 1
+        },
+        {
+          "taskId": "OKR-004-DESIGN",
+          "startWeek": 6,
+          "order": 2
+        },
+        {
+          "taskId": "OKR-007-DESIGN",
+          "startWeek": 8,
+          "order": 3
+        },
+        {
+          "taskId": "OKR-005-QA",
+          "startWeek": 10,
+          "order": 4
+        },
+        {
+          "taskId": "OKR-007-QA",
+          "startWeek": 12,
+          "order": 5
+        },
+        {
+          "taskId": "OKR-006-QA",
+          "startWeek": 14,
+          "order": 6
+        }
+      ]
+    },
+    {
+      "rowIndex": 1,
+      "cards": [
+        {
+          "taskId": "OKR-003-BA",
+          "startWeek": 0,
+          "order": 0
+        },
+        {
+          "taskId": "OKR-005-BA",
+          "startWeek": 4,
+          "order": 1
+        },
+        {
+          "taskId": "OKR-005-DESIGN",
+          "startWeek": 6,
+          "order": 2
+        },
+        {
+          "taskId": "OKR-002-QA",
+          "startWeek": 8,
+          "order": 3
+        },
+        {
+          "taskId": "OKR-003-QA",
+          "startWeek": 10,
+          "order": 4
+        },
+        {
+          "taskId": "OKR-004-QA",
+          "startWeek": 12,
+          "order": 5
+        }
+      ]
+    },
+    {
+      "rowIndex": 2,
+      "cards": [
+        {
+          "taskId": "OKR-001-DEV",
+          "startWeek": 0,
+          "order": 0
+        },
+        {
+          "taskId": "OKR-006-BA",
+          "startWeek": 6,
+          "order": 1
+        },
+        {
+          "taskId": "OKR-005-DEV",
+          "startWeek": 8,
+          "order": 2
+        },
+        {
+          "taskId": "OKR-007-DEV",
+          "startWeek": 10,
+          "order": 3
+        }
+      ]
+    },
+    {
+      "rowIndex": 3,
+      "cards": [
+        {
+          "taskId": "OKR-002-DEV",
+          "startWeek": 4,
+          "order": 0
+        },
+        {
+          "taskId": "OKR-006-DESIGN",
+          "startWeek": 8,
+          "order": 1
+        },
+        {
+          "taskId": "OKR-006-DEV",
+          "startWeek": 10,
+          "order": 2
+        }
+      ]
+    },
+    {
+      "rowIndex": 4,
+      "cards": [
+        {
+          "taskId": "OKR-003-DEV",
+          "startWeek": 4,
+          "order": 0
+        },
+        {
+          "taskId": "OKR-004-DEV",
+          "startWeek": 8,
+          "order": 1
+        }
+      ]
+    },
+    {
+      "rowIndex": 5,
+      "cards": [
+        {
+          "taskId": "OKR-007-BA",
+          "startWeek": 6,
+          "order": 0
+        }
+      ]
+    },
+    {
+      "rowIndex": 6,
+      "cards": [
+        {
+          "taskId": "OKR-001-QA",
+          "startWeek": 6,
+          "order": 0
+        }
+      ]
+    }
+  ]
+}
