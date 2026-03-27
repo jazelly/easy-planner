@@ -1,4 +1,5 @@
-import "../roadmap.css";
+import "./globals.css";
+import "./roadmap.css";
 
 export const metadata = {
   title: "Weekly Task Roadmap",

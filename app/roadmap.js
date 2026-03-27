@@ -18,18 +18,19 @@ const typeLabel = {
 
 const MANIFEST_SCHEMA_VERSION = 1;
 const MANIFEST_FOLDER_NAME = "versions";
-const MANIFEST_INDEX_FILENAME = "manifest-index.json";
-const MANIFEST_HANDLE_DB = "roadmap-manifest-store";
-const MANIFEST_HANDLE_STORE = "handles";
-const MANIFEST_HANDLE_KEY = "versions-directory-handle";
+const THUMBNAIL_MAX_WIDTH = 480;
+const THUMBNAIL_MAX_HEIGHT = 270;
 
 const appState = {
   baseData: null,
+  boardId: "",
   activeManifest: null,
   rowContexts: [],
   boardBounds: null,
-  manifestDirectoryHandle: null,
-  manifestEntries: []
+  manifestEntries: [],
+  currentManifestFileName: "",
+  lastSavedLayoutSignature: "",
+  isDirty: false
 };
 
 function normalizeStatus(status) {
@@ -532,7 +533,8 @@ function enableCardDragAndDrop(
   getActiveRowContext,
   setActiveRowContext,
   findRowContextByClientY,
-  relayoutRowContext
+  relayoutRowContext,
+  onLayoutChanged
 ) {
   const duration = task.endWeek - task.startWeek;
   const maxStartWeek = Math.max(minStartWeek, maxEndWeekExclusive - duration);
@@ -588,6 +590,7 @@ function enableCardDragAndDrop(
     dragging = false;
     card.classList.remove("task-dragging");
     if (moved) card.dataset.suppressClick = "true";
+    if (moved && typeof onLayoutChanged === "function") onLayoutChanged();
   }
 
   card.addEventListener("mousedown", (event) => {
@@ -632,7 +635,7 @@ function escapeHtml(value) {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
+    .replaceAll("\"", "&quot;")
     .replaceAll("'", "&#39;");
 }
 
@@ -813,6 +816,55 @@ function render(data, options = {}) {
       relayoutCardsLayer(rowContext.cardsLayer, rowContext.row);
     }
 
+    function updateRowContextIndexes() {
+      rowContexts.forEach((rowContext, index) => {
+        rowContext.rowIndex = index;
+        rowContext.row.dataset.rowIndex = String(index);
+      });
+    }
+
+    function updateRowInsertionAffordances() {
+      rowContexts.forEach((rowContext, index) => {
+        const isLast = index === rowContexts.length - 1;
+        if (rowContext.insertBeforeControl) {
+          rowContext.insertBeforeControl.dataset.insertIndex = String(index);
+          rowContext.insertBeforeControl.classList.toggle("hidden", index === 0);
+        }
+        if (rowContext.insertAfterControl) {
+          rowContext.insertAfterControl.dataset.insertIndex = String(index + 1);
+          rowContext.insertAfterControl.classList.toggle("hidden", !isLast);
+        }
+      });
+    }
+
+    function moveRowContextToIndex(rowContext, targetIndex) {
+      const currentIndex = rowContexts.indexOf(rowContext);
+      if (currentIndex === -1) return;
+      const clampedTarget = clamp(targetIndex, 0, rowContexts.length);
+      if (clampedTarget === currentIndex) return;
+
+      rowContexts.splice(currentIndex, 1);
+      const normalizedTarget = clampedTarget > currentIndex
+        ? clampedTarget - 1
+        : clampedTarget;
+      rowContexts.splice(normalizedTarget, 0, rowContext);
+      const insertBeforeRow = rowContexts[normalizedTarget + 1]?.row || null;
+      board.insertBefore(rowContext.row, insertBeforeRow);
+      updateRowContextIndexes();
+      updateRowInsertionAffordances();
+    }
+
+    function findTargetRowIndexForClientY(clientY, draggingRowContext) {
+      const candidates = rowContexts.filter((item) => item !== draggingRowContext);
+      if (candidates.length === 0) return rowContexts.indexOf(draggingRowContext);
+      for (const candidate of candidates) {
+        const rect = candidate.row.getBoundingClientRect();
+        const midpoint = rect.top + rect.height / 2;
+        if (clientY < midpoint) return rowContexts.indexOf(candidate);
+      }
+      return rowContexts.length;
+    }
+
     function findRowContextByClientY(clientY) {
       if (!Number.isFinite(clientY)) return null;
       for (const rowContext of rowContexts) {
@@ -833,7 +885,19 @@ function render(data, options = {}) {
       return nearest;
     }
 
-    for (const track of tracks) {
+    function insertBlankRowAt(index) {
+      const clampedIndex = clamp(index, 0, rowContexts.length);
+      const rowContext = createRowContext([]);
+      const insertBeforeRow = rowContexts[clampedIndex]?.row || null;
+      rowContexts.splice(clampedIndex, 0, rowContext);
+      board.insertBefore(rowContext.row, insertBeforeRow);
+      relayoutRowContext(rowContext);
+      updateRowContextIndexes();
+      updateRowInsertionAffordances();
+      syncSaveStateFromCurrentLayout();
+    }
+
+    function createRowContext(track) {
       const row = document.createElement("div");
       row.className = "lane-row";
 
@@ -849,8 +913,108 @@ function render(data, options = {}) {
 
       const cardsLayer = document.createElement("div");
       cardsLayer.className = "cards-layer";
-      const rowContext = { row, cardsLayer, rowIndex: rowContexts.length };
-      rowContexts.push(rowContext);
+      const rowContext = { row, cardsLayer, rowIndex: -1 };
+
+      const sideBar = document.createElement("div");
+      sideBar.className = "row-side-bar";
+      const dragHandle = document.createElement("button");
+      dragHandle.type = "button";
+      dragHandle.className = "row-drag-handle";
+      dragHandle.setAttribute("aria-label", "Drag to reorder row");
+      dragHandle.innerHTML = `
+        <span class="row-drag-grip" aria-hidden="true">
+          <span class="dot"></span><span class="dot"></span>
+          <span class="dot"></span><span class="dot"></span>
+          <span class="dot"></span><span class="dot"></span>
+        </span>
+      `;
+      sideBar.appendChild(dragHandle);
+      row.appendChild(sideBar);
+
+      const insertBeforeControl = document.createElement("button");
+      insertBeforeControl.type = "button";
+      insertBeforeControl.className = "row-insert-control row-insert-before";
+      insertBeforeControl.setAttribute("aria-label", "Add row here");
+      insertBeforeControl.innerHTML = `<span class="row-insert-plus" aria-hidden="true">+</span>`;
+      insertBeforeControl.addEventListener("click", () => {
+        const insertIndex = Math.floor(Number(insertBeforeControl.dataset.insertIndex || "0"));
+        insertBlankRowAt(insertIndex);
+      });
+      row.appendChild(insertBeforeControl);
+
+      const insertAfterControl = document.createElement("button");
+      insertAfterControl.type = "button";
+      insertAfterControl.className = "row-insert-control row-insert-after";
+      insertAfterControl.setAttribute("aria-label", "Add row at end");
+      insertAfterControl.innerHTML = `<span class="row-insert-plus" aria-hidden="true">+</span>`;
+      insertAfterControl.addEventListener("click", () => {
+        const insertIndex = Math.floor(Number(insertAfterControl.dataset.insertIndex || String(rowContexts.length)));
+        insertBlankRowAt(insertIndex);
+      });
+      row.appendChild(insertAfterControl);
+
+      function startRowDrag(clientY) {
+        let moved = false;
+        row.classList.add("row-dragging");
+
+        function updateDrag(nextClientY) {
+          if (!Number.isFinite(nextClientY)) return;
+          const targetIndex = findTargetRowIndexForClientY(nextClientY, rowContext);
+          const currentIndex = rowContexts.indexOf(rowContext);
+          if (targetIndex !== currentIndex) {
+            moved = true;
+            moveRowContextToIndex(rowContext, targetIndex);
+          }
+        }
+
+        function finishDrag() {
+          row.classList.remove("row-dragging");
+          document.removeEventListener("mousemove", onMouseMove);
+          document.removeEventListener("mouseup", onMouseUp);
+          document.removeEventListener("touchmove", onTouchMove);
+          document.removeEventListener("touchend", onTouchEnd);
+          document.removeEventListener("touchcancel", onTouchEnd);
+          if (moved) syncSaveStateFromCurrentLayout();
+        }
+
+        function onMouseMove(event) {
+          updateDrag(event.clientY);
+        }
+        function onMouseUp() {
+          finishDrag();
+        }
+        function onTouchMove(event) {
+          const touch = event.touches[0];
+          if (!touch) return;
+          updateDrag(touch.clientY);
+          event.preventDefault();
+        }
+        function onTouchEnd() {
+          finishDrag();
+        }
+
+        updateDrag(clientY);
+        document.addEventListener("mousemove", onMouseMove);
+        document.addEventListener("mouseup", onMouseUp);
+        document.addEventListener("touchmove", onTouchMove, { passive: false });
+        document.addEventListener("touchend", onTouchEnd);
+        document.addEventListener("touchcancel", onTouchEnd);
+      }
+
+      dragHandle.addEventListener("mousedown", (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        startRowDrag(event.clientY);
+      });
+      dragHandle.addEventListener("touchstart", (event) => {
+        const touch = event.touches[0];
+        if (!touch) return;
+        event.preventDefault();
+        startRowDrag(touch.clientY);
+      }, { passive: false });
+
+      rowContext.insertBeforeControl = insertBeforeControl;
+      rowContext.insertAfterControl = insertAfterControl;
 
       for (const t of track) {
         const prettyType = typeLabel[t.type] || t.type;
@@ -892,12 +1056,15 @@ function render(data, options = {}) {
           visibleStartWeek,
           dataTotalWeeks,
           visibleStartWeek,
-          () => rowContext,
+          () => card._rowContext || rowContext,
           (nextRowContext) => {
             card._rowContext = nextRowContext;
           },
           findRowContextByClientY,
-          relayoutRowContext
+          relayoutRowContext,
+          () => {
+            syncSaveStateFromCurrentLayout();
+          }
         );
         card._rowContext = rowContext;
         cardsLayer.appendChild(card);
@@ -905,8 +1072,16 @@ function render(data, options = {}) {
 
       relayoutRowContext(rowContext);
       row.appendChild(cardsLayer);
-      board.appendChild(row);
+      return rowContext;
     }
+
+    for (const track of tracks) {
+      const rowContext = createRowContext(track);
+      rowContexts.push(rowContext);
+      board.appendChild(rowContext.row);
+    }
+    updateRowContextIndexes();
+    updateRowInsertionAffordances();
     appState.rowContexts = rowContexts;
     appState.boardBounds = {
       visibleStartWeek,
@@ -919,12 +1094,15 @@ function render(data, options = {}) {
         relayoutCardsLayer(rowContext.cardsLayer, rowContext.row);
       }
     }
+    const scheduleFrame = typeof window.requestAnimationFrame === "function"
+      ? window.requestAnimationFrame.bind(window)
+      : (callback) => window.setTimeout(callback, 16);
 
     // Run follow-up relayout passes so stacked cards remain correct after
     // async font/layout settling (common after loading a manifest).
-    window.requestAnimationFrame(() => {
+    scheduleFrame(() => {
       relayoutAllRowsIfCurrentRender();
-      window.requestAnimationFrame(relayoutAllRowsIfCurrentRender);
+      scheduleFrame(relayoutAllRowsIfCurrentRender);
     });
     if (document.fonts && document.fonts.ready) {
       document.fonts.ready.then(relayoutAllRowsIfCurrentRender);
@@ -959,6 +1137,31 @@ async function captureBoardCanvas(board) {
     scale: captureScale,
     logging: false
   });
+}
+
+async function captureBoardThumbnailDataUrl(board) {
+  if (typeof window.html2canvas !== "function") return null;
+  const source = await window.html2canvas(board, {
+    backgroundColor: "#ffffff",
+    useCORS: true,
+    scale: 1,
+    logging: false
+  });
+  const scale = Math.min(
+    1,
+    THUMBNAIL_MAX_WIDTH / Math.max(source.width, 1),
+    THUMBNAIL_MAX_HEIGHT / Math.max(source.height, 1)
+  );
+  const width = Math.max(1, Math.round(source.width * scale));
+  const height = Math.max(1, Math.round(source.height * scale));
+  const target = document.createElement("canvas");
+  target.width = width;
+  target.height = height;
+  const ctx = target.getContext("2d");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(source, 0, 0, width, height);
+  return target.toDataURL("image/png", 0.82);
 }
 
 function buildTargetCanvas(width, height) {
@@ -1014,175 +1217,98 @@ function getManifestLastLinkElement() {
   return document.getElementById("manifest-last-link");
 }
 
+function getSaveStatePillElement() {
+  return document.getElementById("save-state-pill");
+}
+
+function getVersionDashboardListElement() {
+  return document.getElementById("version-dashboard-list");
+}
+
 function setManifestStatus(message) {
   const statusEl = getManifestStatusElement();
   if (!statusEl) return;
   statusEl.textContent = message;
 }
 
-function setLastManifestLink(fileName, contentText) {
+function setLastManifestLink(fileName) {
   const linkEl = getManifestLastLinkElement();
   if (!linkEl) return;
-  if (!fileName || !contentText) {
+  if (!fileName) {
     linkEl.classList.add("hidden");
     linkEl.removeAttribute("href");
+    linkEl.removeAttribute("download");
     return;
   }
-  const blob = new Blob([contentText], { type: "application/json" });
-  const objectUrl = URL.createObjectURL(blob);
-  linkEl.href = objectUrl;
+  const params = new URLSearchParams({
+    boardId: appState.boardId,
+    name: fileName,
+    raw: "1"
+  });
+  linkEl.href = `/api/manifests?${params.toString()}`;
   linkEl.download = fileName;
   linkEl.textContent = `Open last saved manifest (${fileName})`;
   linkEl.classList.remove("hidden");
 }
 
-function supportsFolderManifestPersistence() {
-  return typeof window.showDirectoryPicker === "function";
+function setSaveStateDirty(isDirty) {
+  const saveStatePill = getSaveStatePillElement();
+  appState.isDirty = Boolean(isDirty);
+  if (!saveStatePill) return;
+  saveStatePill.textContent = appState.isDirty ? "Unsaved" : "Saved";
+  saveStatePill.classList.toggle("save-state-unsaved", appState.isDirty);
+  saveStatePill.classList.toggle("save-state-saved", !appState.isDirty);
 }
 
-function supportsHandleStorage() {
-  return typeof window.indexedDB !== "undefined";
+function getCurrentLayoutSignature() {
+  if (!appState.baseData || appState.rowContexts.length === 0) return "";
+  const layoutManifest = createLayoutManifest(appState.baseData);
+  return JSON.stringify(layoutManifest.rows || []);
 }
 
-function openManifestHandleDb() {
-  return new Promise((resolve, reject) => {
-    const request = window.indexedDB.open(MANIFEST_HANDLE_DB, 1);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(MANIFEST_HANDLE_STORE)) {
-        db.createObjectStore(MANIFEST_HANDLE_STORE);
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error("Failed to open manifest handle database."));
-  });
+function markCurrentLayoutAsSaved() {
+  appState.lastSavedLayoutSignature = getCurrentLayoutSignature();
+  setSaveStateDirty(false);
 }
 
-function loadStoredManifestDirectoryHandle() {
-  return new Promise(async (resolve, reject) => {
-    if (!supportsHandleStorage()) {
-      resolve(null);
-      return;
-    }
-    let db;
-    try {
-      db = await openManifestHandleDb();
-    } catch (error) {
-      reject(error);
-      return;
-    }
-    const tx = db.transaction(MANIFEST_HANDLE_STORE, "readonly");
-    const store = tx.objectStore(MANIFEST_HANDLE_STORE);
-    const request = store.get(MANIFEST_HANDLE_KEY);
-    request.onsuccess = () => {
-      resolve(request.result || null);
-      db.close();
-    };
-    request.onerror = () => {
-      reject(request.error || new Error("Failed to read stored manifest folder handle."));
-      db.close();
-    };
-  });
-}
-
-function saveManifestDirectoryHandle(handle) {
-  return new Promise(async (resolve, reject) => {
-    if (!supportsHandleStorage()) {
-      resolve();
-      return;
-    }
-    let db;
-    try {
-      db = await openManifestHandleDb();
-    } catch (error) {
-      reject(error);
-      return;
-    }
-    const tx = db.transaction(MANIFEST_HANDLE_STORE, "readwrite");
-    tx.oncomplete = () => {
-      db.close();
-      resolve();
-    };
-    tx.onerror = () => {
-      db.close();
-      reject(tx.error || new Error("Failed to save manifest folder handle."));
-    };
-    tx.objectStore(MANIFEST_HANDLE_STORE).put(handle, MANIFEST_HANDLE_KEY);
-  });
-}
-
-async function applyManifestDirectoryHandle(handle) {
-  appState.manifestDirectoryHandle = handle;
-  await refreshManifestEntries();
-  const folderName = handle.name || MANIFEST_FOLDER_NAME;
-  setManifestStatus(`Using ${folderName} folder manifests.`);
-}
-
-async function restoreManifestDirectoryHandle() {
-  if (!supportsFolderManifestPersistence()) return false;
-  if (!supportsHandleStorage()) return false;
-  try {
-    const handle = await loadStoredManifestDirectoryHandle();
-    if (!handle) return false;
-    const permission = await handle.queryPermission({ mode: "readwrite" });
-    if (permission !== "granted") return false;
-    await applyManifestDirectoryHandle(handle);
-    return true;
-  } catch (_) {
-    return false;
+function syncSaveStateFromCurrentLayout() {
+  const currentSignature = getCurrentLayoutSignature();
+  if (!currentSignature) return;
+  if (!appState.lastSavedLayoutSignature) {
+    appState.lastSavedLayoutSignature = currentSignature;
   }
-}
-
-async function requestManifestDirectoryHandle() {
-  if (!supportsFolderManifestPersistence()) {
-    throw new Error("Directory picker is not supported in this browser.");
-  }
-  const handle = await window.showDirectoryPicker({ mode: "readwrite", id: "roadmap-versions-manifests" });
-  await applyManifestDirectoryHandle(handle);
-  try {
-    await saveManifestDirectoryHandle(handle);
-  } catch (_) {
-    // Non-fatal: saving handle for auto-restore is best-effort.
-  }
-  return handle;
-}
-
-async function ensureManifestDirectoryHandle() {
-  if (appState.manifestDirectoryHandle) {
-    const permission = await appState.manifestDirectoryHandle.queryPermission({ mode: "readwrite" });
-    if (permission === "granted") return appState.manifestDirectoryHandle;
-  }
-
-  const restored = await restoreManifestDirectoryHandle();
-  if (restored && appState.manifestDirectoryHandle) return appState.manifestDirectoryHandle;
-
-  setManifestStatus(`Grant access to the ${MANIFEST_FOLDER_NAME} folder to save/load manifests.`);
-  return requestManifestDirectoryHandle();
-}
-
-async function writeManifestIndexToHandle() {
-  if (!appState.manifestDirectoryHandle) return;
-  const fileNames = appState.manifestEntries
-    .map((entry) => entry.name)
-    .filter((name) => name.startsWith("roadmap-manifest-") && name.toLowerCase().endsWith(".json"))
-    .sort((a, b) => a.localeCompare(b))
-    .reverse();
-  const indexHandle = await appState.manifestDirectoryHandle.getFileHandle(MANIFEST_INDEX_FILENAME, { create: true });
-  const writer = await indexHandle.createWritable();
-  await writer.write(`${JSON.stringify({ manifests: fileNames }, null, 2)}\n`);
-  await writer.close();
+  setSaveStateDirty(currentSignature !== appState.lastSavedLayoutSignature);
 }
 
 function getManifestHistorySelect() {
   return document.getElementById("manifest-history-select");
 }
 
+function getManifestFromQueryParam() {
+  try {
+    const params = new URLSearchParams(window.location.search || "");
+    return String(params.get("manifest") || "").trim();
+  } catch (_) {
+    return "";
+  }
+}
+
+function getBoardIdFromPath() {
+  try {
+    const parts = String(window.location.pathname || "").split("/").filter(Boolean);
+    if (parts.length >= 2 && parts[0] === "boards") return String(parts[1] || "").trim();
+    return "";
+  } catch (_) {
+    return "";
+  }
+}
+
 function formatHistoryLabel(entry) {
-  const savedAt = entry.manifest?.savedAt ? new Date(entry.manifest.savedAt) : null;
+  const savedAt = entry?.savedAt ? new Date(entry.savedAt) : null;
   const prettyDate = savedAt && !Number.isNaN(savedAt.getTime())
     ? savedAt.toLocaleString()
-    : entry.name;
-  return `${entry.name} (${prettyDate})`;
+    : (entry?.fileName || "unknown");
+  return `v${String(entry.version || 0).padStart(4, "0")} - ${prettyDate}`;
 }
 
 function updateManifestHistorySelect() {
@@ -1199,125 +1325,146 @@ function updateManifestHistorySelect() {
   }
   for (const entry of appState.manifestEntries) {
     const option = document.createElement("option");
-    option.value = entry.name;
-    option.textContent = formatHistoryLabel(entry);
+    option.value = entry.fileName;
+    option.textContent = `${formatHistoryLabel(entry)} (${entry.fileName})`;
     select.appendChild(option);
   }
-  if (previousValue) {
-    const hasPreviousValue = appState.manifestEntries.some((entry) => entry.name === previousValue);
-    if (hasPreviousValue) {
-      select.value = previousValue;
-    }
+  const targetValue = appState.currentManifestFileName || previousValue;
+  if (!targetValue) return;
+  const hasTarget = appState.manifestEntries.some((entry) => entry.fileName === targetValue);
+  if (hasTarget) {
+    select.value = targetValue;
   }
 }
 
-async function readManifestFromHandle(fileHandle) {
-  const file = await fileHandle.getFile();
-  const text = await file.text();
-  const manifest = JSON.parse(text);
-  return { file, text, manifest };
-}
+function renderVersionDashboard() {
+  const listEl = getVersionDashboardListElement();
+  if (!listEl) return;
+  clearChildren(listEl);
 
-async function readManifestFromUrl(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch manifest (${response.status})`);
+  if (appState.manifestEntries.length === 0) {
+    const placeholder = document.createElement("p");
+    placeholder.className = "hint";
+    placeholder.textContent = "No saved versions yet.";
+    listEl.appendChild(placeholder);
+    return;
   }
-  const text = await response.text();
-  const manifest = JSON.parse(text);
-  return { text, manifest };
-}
 
-function normalizeManifestIndexPayload(payload) {
-  if (Array.isArray(payload)) return payload;
-  if (payload && Array.isArray(payload.manifests)) return payload.manifests;
-  return [];
-}
+  for (const entry of appState.manifestEntries) {
+    const card = document.createElement("article");
+    card.className = "version-item";
 
-async function loadManifestEntriesFromVersionsFolder() {
-  const indexUrl = `./${MANIFEST_FOLDER_NAME}/${MANIFEST_INDEX_FILENAME}`;
-  try {
-    const response = await fetch(indexUrl, { cache: "no-store" });
-    if (!response.ok) return [];
-    const payload = await response.json();
-    const fileNames = normalizeManifestIndexPayload(payload);
-    const entries = [];
-    for (const fileName of fileNames) {
-      const name = String(fileName || "").trim();
-      if (!name.startsWith("roadmap-manifest-") || !name.toLowerCase().endsWith(".json")) continue;
+    const head = document.createElement("div");
+    head.className = "version-item-head";
+    const title = document.createElement("h3");
+    title.className = "version-item-title";
+    title.textContent = `v${String(entry.version || 0).padStart(4, "0")}`;
+    const badge = document.createElement("span");
+    badge.className = "task-status task-status-new";
+    badge.textContent = entry.fileName === appState.currentManifestFileName ? "Current" : "Previous";
+    head.appendChild(title);
+    head.appendChild(badge);
+
+    const meta = document.createElement("p");
+    meta.className = "version-item-meta";
+    meta.textContent = entry.savedAt
+      ? new Date(entry.savedAt).toLocaleString()
+      : (entry.createdAt ? new Date(entry.createdAt).toLocaleString() : entry.fileName);
+
+    const thumb = document.createElement("img");
+    thumb.className = "version-item-thumb";
+    thumb.alt = `Thumbnail for ${entry.fileName}`;
+    thumb.src = entry.thumbnailUrl || "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
+
+    const actions = document.createElement("div");
+    actions.className = "version-item-actions";
+    const loadButton = document.createElement("button");
+    loadButton.type = "button";
+    loadButton.className = "secondary-btn";
+    loadButton.textContent = "Load";
+    loadButton.addEventListener("click", async () => {
       try {
-        const url = `./${MANIFEST_FOLDER_NAME}/${encodeURIComponent(name)}`;
-        const loaded = await readManifestFromUrl(url);
-        entries.push({
-          name,
-          url,
-          source: "versions",
-          manifest: loaded.manifest
-        });
-      } catch (_) {
-        // Skip missing or invalid files referenced by index.
+        await loadSelectedManifest(entry.fileName);
+      } catch (error) {
+        setManifestStatus(`Load failed: ${error.message}`);
       }
+    });
+    actions.appendChild(loadButton);
+
+    card.appendChild(head);
+    card.appendChild(meta);
+    card.appendChild(thumb);
+    card.appendChild(actions);
+    listEl.appendChild(card);
+  }
+}
+
+async function fetchManifestByName(fileName) {
+  const params = new URLSearchParams({
+    boardId: appState.boardId,
+    name: fileName
+  });
+  const response = await fetch(`/api/manifests?${params.toString()}`, { cache: "no-store" });
+  if (!response.ok) {
+    let message = `Failed to fetch manifest (${response.status})`;
+    try {
+      const payload = await response.json();
+      if (payload?.error) message = payload.error;
+    } catch (_) {
+      // Keep default error
     }
-    return entries;
-  } catch (_) {
-    return [];
+    throw new Error(message);
   }
-}
-
-function isLocalFileProtocol() {
-  return String(window.location.protocol || "").toLowerCase() === "file:";
-}
-
-async function canEnumerateDirectoryHandle() {
-  if (!appState.manifestDirectoryHandle) return false;
-  try {
-    const permission = await appState.manifestDirectoryHandle.queryPermission({ mode: "readwrite" });
-    return permission === "granted";
-  } catch (_) {
-    return false;
+  const payload = await response.json();
+  if (!payload?.manifest || typeof payload.manifest !== "object") {
+    throw new Error("Manifest payload was invalid.");
   }
+  return payload.manifest;
 }
 
 async function refreshManifestEntries() {
-  const entriesByName = new Map();
-
-  const versionEntries = await loadManifestEntriesFromVersionsFolder();
-  for (const entry of versionEntries) entriesByName.set(entry.name, entry);
-
-  if (await canEnumerateDirectoryHandle()) {
-    for await (const [name, handle] of appState.manifestDirectoryHandle.entries()) {
-      if (handle.kind !== "file") continue;
-      if (!name.toLowerCase().endsWith(".json")) continue;
-      if (!name.startsWith("roadmap-manifest-")) continue;
-      try {
-        const loaded = await readManifestFromHandle(handle);
-        entriesByName.set(name, {
-          name,
-          handle,
-          source: "handle",
-          manifest: loaded.manifest
-        });
-      } catch (_) {
-        // Skip files that are not valid manifest JSON.
-      }
+  const params = new URLSearchParams({
+    boardId: appState.boardId
+  });
+  const response = await fetch(`/api/manifests?${params.toString()}`, { cache: "no-store" });
+  if (!response.ok) {
+    let message = `Failed to load versions (${response.status})`;
+    try {
+      const payload = await response.json();
+      if (payload?.error) message = payload.error;
+    } catch (_) {
+      // Keep default error
     }
+    throw new Error(message);
   }
-
-  const entries = Array.from(entriesByName.values());
-  entries.sort((a, b) => a.name.localeCompare(b.name)).reverse();
-  appState.manifestEntries = entries;
+  const payload = await response.json();
+  const entries = Array.isArray(payload?.manifests) ? payload.manifests : [];
+  appState.manifestEntries = entries.slice().sort((a, b) => Number(b.version || 0) - Number(a.version || 0));
   updateManifestHistorySelect();
-  return entries.length;
+  renderVersionDashboard();
 }
 
 async function saveManifestSnapshot() {
+  const board = document.getElementById("board");
   const currentManifest = createLayoutManifest(appState.baseData);
+  let thumbnailDataUrl = null;
+  if (board) {
+    try {
+      thumbnailDataUrl = await captureBoardThumbnailDataUrl(board);
+    } catch (_) {
+      thumbnailDataUrl = null;
+    }
+  }
   const response = await fetch("/api/manifests", {
     method: "POST",
     headers: {
       "content-type": "application/json"
     },
-    body: JSON.stringify({ manifest: currentManifest })
+    body: JSON.stringify({
+      boardId: appState.boardId,
+      manifest: currentManifest,
+      thumbnailDataUrl
+    })
   });
   if (!response.ok) {
     let message = `Failed to save manifest (${response.status})`;
@@ -1335,45 +1482,39 @@ async function saveManifestSnapshot() {
   if (!fileName || !Number.isFinite(version) || version <= 0) {
     throw new Error("Save response was missing manifest metadata.");
   }
-  const text = JSON.stringify(currentManifest, null, 2);
-
-  await refreshManifestEntries();
-  setLastManifestLink(fileName, text);
-  setManifestStatus(`Saved manifest version v${String(version).padStart(4, "0")} as ${fileName}.`);
+  appState.currentManifestFileName = fileName;
   appState.activeManifest = currentManifest;
+  await refreshManifestEntries();
+  setLastManifestLink(fileName);
+  setManifestStatus(`Saved manifest version v${String(version).padStart(4, "0")} as ${fileName}.`);
+  markCurrentLayoutAsSaved();
 }
 
-async function loadSelectedManifest() {
+async function loadSelectedManifest(selectedNameOverride = "") {
   const select = getManifestHistorySelect();
-  const selectedName = String(select?.value || "");
+  const selectedName = String(selectedNameOverride || select?.value || "");
   if (!selectedName) {
     throw new Error("Select a manifest version first.");
   }
-
-  await refreshManifestEntries();
-
-  const selected = appState.manifestEntries.find((entry) => entry.name === selectedName);
-  if (!selected) {
-    throw new Error("Selected manifest was not found in versions.");
-  }
-  let loaded;
-  if (selected.source === "handle" && selected.handle) {
-    loaded = await readManifestFromHandle(selected.handle);
-  } else if (selected.url) {
-    loaded = await readManifestFromUrl(selected.url);
-  } else {
-    throw new Error("Selected manifest has no readable source.");
-  }
-  appState.activeManifest = loaded.manifest;
+  const manifest = await fetchManifestByName(selectedName);
+  appState.activeManifest = manifest;
+  appState.currentManifestFileName = selectedName;
   render(appState.baseData, { layoutManifest: appState.activeManifest });
-  setLastManifestLink(selected.name, loaded.text);
-  setManifestStatus(`Loaded manifest: ${selected.name}`);
+  updateManifestHistorySelect();
+  renderVersionDashboard();
+  setLastManifestLink(selectedName);
+  setManifestStatus(`Loaded manifest: ${selectedName}`);
+  markCurrentLayoutAsSaved();
 }
 
 function resetLayoutToBaseline() {
   appState.activeManifest = null;
+  appState.currentManifestFileName = "";
   render(appState.baseData);
+  updateManifestHistorySelect();
+  renderVersionDashboard();
   setManifestStatus("Layout reset to baseline algorithm output from roadmap-data.js.");
+  markCurrentLayoutAsSaved();
 }
 
 function initManifestControls() {
@@ -1381,32 +1522,51 @@ function initManifestControls() {
   const loadBtn = document.getElementById("load-manifest-btn");
   const resetBtn = document.getElementById("reset-layout-btn");
 
-  if (!saveBtn || !loadBtn || !resetBtn) return;
+  if (!saveBtn || !resetBtn) return;
   if (saveBtn.dataset.bound === "true") return;
 
   saveBtn.addEventListener("click", async () => {
+    saveBtn.disabled = true;
+    const originalText = saveBtn.textContent;
+    saveBtn.textContent = "Saving...";
     try {
       await saveManifestSnapshot();
     } catch (error) {
       setManifestStatus(`Save failed: ${error.message}`);
+    } finally {
+      saveBtn.textContent = originalText;
+      saveBtn.disabled = false;
     }
   });
 
-  loadBtn.addEventListener("click", async () => {
-    try {
-      await loadSelectedManifest();
-    } catch (error) {
-      setManifestStatus(`Load failed: ${error.message}`);
-    }
-  });
+  if (loadBtn) {
+    loadBtn.addEventListener("click", async () => {
+      try {
+        await loadSelectedManifest();
+      } catch (error) {
+        setManifestStatus(`Load failed: ${error.message}`);
+      }
+    });
+  }
 
   resetBtn.addEventListener("click", () => {
     resetLayoutToBaseline();
   });
 
   (async () => {
-    await refreshManifestEntries();
-    setManifestStatus(`Save/load uses ${MANIFEST_FOLDER_NAME} folder manifests.`);
+    try {
+      await refreshManifestEntries();
+      const manifestFromQuery = getManifestFromQueryParam();
+      if (manifestFromQuery) {
+        await loadSelectedManifest(manifestFromQuery);
+      }
+      setManifestStatus(
+        `Board ${appState.boardId}: save/reset uses ${MANIFEST_FOLDER_NAME} manifests with SQLite metadata + thumbnails.`
+      );
+      syncSaveStateFromCurrentLayout();
+    } catch (error) {
+      setManifestStatus(`Failed to load saved versions: ${error.message}`);
+    }
   })();
   saveBtn.dataset.bound = "true";
 }
@@ -1443,6 +1603,17 @@ function initExportControls() {
 }
 
 function bootRoadmapApp(attempt = 0) {
+  if (!appState.boardId) {
+    appState.boardId = getBoardIdFromPath();
+  }
+  if (!appState.boardId) {
+    const errorsEl = document.getElementById("errors");
+    if (errorsEl) {
+      errorsEl.classList.remove("hidden");
+      errorsEl.textContent = "Missing board ID in URL.";
+    }
+    return;
+  }
   if (window.roadmapData && typeof window.roadmapData === "object") {
     appState.baseData = window.roadmapData;
     render(appState.baseData);

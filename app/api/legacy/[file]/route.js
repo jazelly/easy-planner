@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-const LEGACY_FILES = new Set(["roadmap.js", "roadmap-data.js"]);
+const LEGACY_FILES = new Set(["roadmap-data.js"]);
 
 function contentTypeForFile(file) {
   if (file.endsWith(".js")) return "text/javascript; charset=utf-8";
