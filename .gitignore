@@ -1,0 +1,5 @@
+node_modules/
+versions/
+thumbnails/
+data/
+.next
