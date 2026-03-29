@@ -17,20 +17,25 @@ const typeLabel = {
 };
 
 const MANIFEST_SCHEMA_VERSION = 1;
-const MANIFEST_FOLDER_NAME = "versions";
 const THUMBNAIL_MAX_WIDTH = 480;
 const THUMBNAIL_MAX_HEIGHT = 270;
 
 const appState = {
   baseData: null,
   boardId: "",
+  boardName: "Untitled board",
   activeManifest: null,
   rowContexts: [],
   boardBounds: null,
   manifestEntries: [],
   currentManifestFileName: "",
   lastSavedLayoutSignature: "",
-  isDirty: false
+  lastAutoSavedLayoutSignature: "",
+  isDirty: false,
+  boardNameSaveTimer: null,
+  boardNameSaveSeq: 0,
+  autosaveTimer: null,
+  autosaveSeq: 0
 };
 
 function normalizeStatus(status) {
@@ -1217,18 +1222,49 @@ function getManifestLastLinkElement() {
   return document.getElementById("manifest-last-link");
 }
 
-function getSaveStatePillElement() {
-  return document.getElementById("save-state-pill");
+function getBoardNameInputElement() {
+  return document.getElementById("board-name-input");
+}
+
+function getBoardNameSaveStatusElement() {
+  return document.getElementById("board-name-save-status");
 }
 
 function getVersionDashboardListElement() {
   return document.getElementById("version-dashboard-list");
 }
 
+function getToastHostElement() {
+  return document.getElementById("toast-host");
+}
+
 function setManifestStatus(message) {
   const statusEl = getManifestStatusElement();
   if (!statusEl) return;
   statusEl.textContent = message;
+}
+
+function showToast(message, durationMs = 2200) {
+  const host = getToastHostElement();
+  if (!host) return;
+  const toast = document.createElement("div");
+  toast.className = "app-toast";
+  toast.setAttribute("role", "status");
+  toast.setAttribute("aria-live", "polite");
+  toast.textContent = String(message || "").trim() || "Saved";
+  host.appendChild(toast);
+
+  window.requestAnimationFrame(() => {
+    toast.classList.add("show");
+  });
+
+  window.setTimeout(() => {
+    toast.classList.remove("show");
+    toast.classList.add("hide");
+    window.setTimeout(() => {
+      toast.remove();
+    }, 220);
+  }, durationMs);
 }
 
 function setLastManifestLink(fileName) {
@@ -1247,17 +1283,147 @@ function setLastManifestLink(fileName) {
   });
   linkEl.href = `/api/manifests?${params.toString()}`;
   linkEl.download = fileName;
-  linkEl.textContent = `Open last saved manifest (${fileName})`;
+  linkEl.textContent = "Open latest saved version";
   linkEl.classList.remove("hidden");
 }
 
 function setSaveStateDirty(isDirty) {
-  const saveStatePill = getSaveStatePillElement();
   appState.isDirty = Boolean(isDirty);
-  if (!saveStatePill) return;
-  saveStatePill.textContent = appState.isDirty ? "Unsaved" : "Saved";
-  saveStatePill.classList.toggle("save-state-unsaved", appState.isDirty);
-  saveStatePill.classList.toggle("save-state-saved", !appState.isDirty);
+}
+
+function setBoardNameSaveStatus(state, label = "") {
+  const statusEl = getBoardNameSaveStatusElement();
+  if (!statusEl) return;
+  const spinnerEl = statusEl.querySelector(".status-spinner");
+  const textEl = statusEl.querySelector(".status-label");
+  const resolvedLabel = String(label || (
+    state === "saving" ? "Saving..." :
+      state === "error" ? "Save failed" :
+        state === "unsaved" ? "Unsaved" :
+          "Saved"
+  ));
+  if (textEl) textEl.textContent = resolvedLabel;
+  if (spinnerEl) {
+    spinnerEl.classList.toggle("hidden", state !== "saving");
+  }
+  statusEl.dataset.state = state;
+}
+
+async function fetchBoardMeta() {
+  const response = await fetch(`/api/boards/${encodeURIComponent(appState.boardId)}`, { cache: "no-store" });
+  if (!response.ok) {
+    let message = `Failed to load board metadata (${response.status})`;
+    try {
+      const payload = await response.json();
+      if (payload?.error) message = payload.error;
+    } catch (_) {
+      // Keep default message.
+    }
+    throw new Error(message);
+  }
+  const payload = await response.json();
+  return payload?.board || null;
+}
+
+async function persistBoardName(nextName) {
+  const normalizedName = String(nextName || "").trim() || "Untitled board";
+  const response = await fetch(`/api/boards/${encodeURIComponent(appState.boardId)}`, {
+    method: "PATCH",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      name: normalizedName
+    })
+  });
+  if (!response.ok) {
+    let message = `Failed to save board name (${response.status})`;
+    try {
+      const payload = await response.json();
+      if (payload?.error) message = payload.error;
+    } catch (_) {
+      // Keep default message.
+    }
+    throw new Error(message);
+  }
+  const payload = await response.json();
+  const savedName = String(payload?.board?.name || normalizedName).trim() || "Untitled board";
+  appState.boardName = savedName;
+  return savedName;
+}
+
+function initBoardHeaderControls() {
+  const input = getBoardNameInputElement();
+  if (!input) return;
+  if (input.dataset.bound === "true") return;
+
+  let lastCommittedName = appState.boardName;
+
+  function scheduleSave(immediate = false) {
+    if (appState.boardNameSaveTimer) {
+      window.clearTimeout(appState.boardNameSaveTimer);
+      appState.boardNameSaveTimer = null;
+    }
+    const run = async () => {
+      const currentValue = String(input.value || "").trim() || "Untitled board";
+      if (currentValue === lastCommittedName) {
+        setBoardNameSaveStatus("saved", "Saved");
+        return;
+      }
+      setBoardNameSaveStatus("saving", "Saving...");
+      const saveSeq = ++appState.boardNameSaveSeq;
+      try {
+        const savedName = await persistBoardName(currentValue);
+        if (saveSeq !== appState.boardNameSaveSeq) return;
+        lastCommittedName = savedName;
+        input.value = savedName;
+        setBoardNameSaveStatus("saved", "Saved");
+      } catch (error) {
+        if (saveSeq !== appState.boardNameSaveSeq) return;
+        const message = error instanceof Error ? error.message : "Failed to save board name.";
+        setBoardNameSaveStatus("error", message);
+      }
+    };
+    if (immediate) {
+      void run();
+      return;
+    }
+    appState.boardNameSaveTimer = window.setTimeout(() => {
+      appState.boardNameSaveTimer = null;
+      void run();
+    }, 500);
+  }
+
+  input.addEventListener("input", () => {
+    setBoardNameSaveStatus("unsaved", "Unsaved");
+    scheduleSave(false);
+  });
+
+  input.addEventListener("blur", () => {
+    scheduleSave(true);
+  });
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    scheduleSave(true);
+    input.blur();
+  });
+
+  input.dataset.bound = "true";
+  setBoardNameSaveStatus("saving", "Loading...");
+  void fetchBoardMeta()
+    .then((board) => {
+      const nextName = String(board?.name || "Untitled board").trim() || "Untitled board";
+      appState.boardName = nextName;
+      lastCommittedName = nextName;
+      input.value = nextName;
+      setBoardNameSaveStatus("saved", "Saved");
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : "Failed to load board name.";
+      setBoardNameSaveStatus("error", message);
+    });
 }
 
 function getCurrentLayoutSignature() {
@@ -1267,7 +1433,9 @@ function getCurrentLayoutSignature() {
 }
 
 function markCurrentLayoutAsSaved() {
-  appState.lastSavedLayoutSignature = getCurrentLayoutSignature();
+  const signature = getCurrentLayoutSignature();
+  appState.lastSavedLayoutSignature = signature;
+  appState.lastAutoSavedLayoutSignature = signature;
   setSaveStateDirty(false);
 }
 
@@ -1277,7 +1445,11 @@ function syncSaveStateFromCurrentLayout() {
   if (!appState.lastSavedLayoutSignature) {
     appState.lastSavedLayoutSignature = currentSignature;
   }
-  setSaveStateDirty(currentSignature !== appState.lastSavedLayoutSignature);
+  const nextDirty = currentSignature !== appState.lastSavedLayoutSignature;
+  setSaveStateDirty(nextDirty);
+  if (nextDirty) {
+    scheduleLayoutAutosave();
+  }
 }
 
 function getManifestHistorySelect() {
@@ -1444,6 +1616,55 @@ async function refreshManifestEntries() {
   renderVersionDashboard();
 }
 
+async function saveLayoutAutosave() {
+  const currentManifest = createLayoutManifest(appState.baseData);
+  const response = await fetch("/api/manifests", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      boardId: appState.boardId,
+      mode: "autosave",
+      manifest: currentManifest
+    })
+  });
+  if (!response.ok) {
+    let message = `Failed to autosave layout (${response.status})`;
+    try {
+      const payload = await response.json();
+      if (payload?.error) message = payload.error;
+    } catch (_) {
+      // Keep default message.
+    }
+    throw new Error(message);
+  }
+  appState.lastAutoSavedLayoutSignature = getCurrentLayoutSignature();
+}
+
+function scheduleLayoutAutosave() {
+  if (!appState.baseData || !appState.boardId) return;
+  const currentSignature = getCurrentLayoutSignature();
+  if (!currentSignature || currentSignature === appState.lastAutoSavedLayoutSignature) return;
+  if (appState.autosaveTimer) {
+    window.clearTimeout(appState.autosaveTimer);
+    appState.autosaveTimer = null;
+  }
+  const pendingSeq = ++appState.autosaveSeq;
+  appState.autosaveTimer = window.setTimeout(async () => {
+    appState.autosaveTimer = null;
+    if (!appState.isDirty) return;
+    if (pendingSeq !== appState.autosaveSeq) return;
+    const latestSignature = getCurrentLayoutSignature();
+    if (!latestSignature || latestSignature === appState.lastAutoSavedLayoutSignature) return;
+    try {
+      await saveLayoutAutosave();
+    } catch (_) {
+      // Silent failure: manual save still available and versioned.
+    }
+  }, 1500);
+}
+
 async function saveManifestSnapshot() {
   const board = document.getElementById("board");
   const currentManifest = createLayoutManifest(appState.baseData);
@@ -1482,11 +1703,12 @@ async function saveManifestSnapshot() {
   if (!fileName || !Number.isFinite(version) || version <= 0) {
     throw new Error("Save response was missing manifest metadata.");
   }
+  appState.lastAutoSavedLayoutSignature = getCurrentLayoutSignature();
   appState.currentManifestFileName = fileName;
   appState.activeManifest = currentManifest;
   await refreshManifestEntries();
   setLastManifestLink(fileName);
-  setManifestStatus(`Saved manifest version v${String(version).padStart(4, "0")} as ${fileName}.`);
+  showToast("Version saved");
   markCurrentLayoutAsSaved();
 }
 
@@ -1505,6 +1727,23 @@ async function loadSelectedManifest(selectedNameOverride = "") {
   setLastManifestLink(selectedName);
   setManifestStatus(`Loaded manifest: ${selectedName}`);
   markCurrentLayoutAsSaved();
+}
+
+async function loadAutosavedLayoutIfAvailable() {
+  const params = new URLSearchParams({
+    boardId: appState.boardId,
+    autosave: "1"
+  });
+  const response = await fetch(`/api/manifests?${params.toString()}`, { cache: "no-store" });
+  if (!response.ok) return false;
+  const payload = await response.json();
+  const manifest = payload?.manifest;
+  if (!manifest || typeof manifest !== "object") return false;
+  appState.activeManifest = manifest;
+  appState.currentManifestFileName = "";
+  render(appState.baseData, { layoutManifest: appState.activeManifest });
+  markCurrentLayoutAsSaved();
+  return true;
 }
 
 function resetLayoutToBaseline() {
@@ -1527,14 +1766,18 @@ function initManifestControls() {
 
   saveBtn.addEventListener("click", async () => {
     saveBtn.disabled = true;
-    const originalText = saveBtn.textContent;
-    saveBtn.textContent = "Saving...";
+    const originalLabel = saveBtn.getAttribute("aria-label") || "Save manifest snapshot";
+    saveBtn.dataset.busy = "true";
+    saveBtn.setAttribute("aria-label", "Saving manifest snapshot");
+    saveBtn.setAttribute("title", "Saving manifest snapshot");
     try {
       await saveManifestSnapshot();
     } catch (error) {
       setManifestStatus(`Save failed: ${error.message}`);
     } finally {
-      saveBtn.textContent = originalText;
+      saveBtn.removeAttribute("data-busy");
+      saveBtn.setAttribute("aria-label", originalLabel);
+      saveBtn.setAttribute("title", originalLabel);
       saveBtn.disabled = false;
     }
   });
@@ -1559,10 +1802,10 @@ function initManifestControls() {
       const manifestFromQuery = getManifestFromQueryParam();
       if (manifestFromQuery) {
         await loadSelectedManifest(manifestFromQuery);
+      } else {
+        await loadAutosavedLayoutIfAvailable();
       }
-      setManifestStatus(
-        `Board ${appState.boardId}: save/reset uses ${MANIFEST_FOLDER_NAME} manifests with SQLite metadata + thumbnails.`
-      );
+      setManifestStatus("");
       syncSaveStateFromCurrentLayout();
     } catch (error) {
       setManifestStatus(`Failed to load saved versions: ${error.message}`);
@@ -1581,8 +1824,13 @@ function initExportControls() {
   button.addEventListener("click", async () => {
     const mode = modeSelect.value === "slices" ? "slices" : "fit";
     button.disabled = true;
-    const originalText = button.textContent;
-    button.textContent = mode === "slices" ? "Exporting slices..." : "Exporting 8K...";
+    const originalLabel = button.getAttribute("aria-label") || "Export board as PNG (8K)";
+    const busyLabel = mode === "slices"
+      ? "Exporting readable slices"
+      : "Exporting fit image";
+    button.dataset.busy = "true";
+    button.setAttribute("aria-label", busyLabel);
+    button.setAttribute("title", busyLabel);
 
     try {
       const sourceCanvas = await captureBoardCanvas(board);
@@ -1594,7 +1842,9 @@ function initExportControls() {
     } catch (error) {
       alert(`Export failed: ${error.message}`);
     } finally {
-      button.textContent = originalText;
+      button.removeAttribute("data-busy");
+      button.setAttribute("aria-label", originalLabel);
+      button.setAttribute("title", originalLabel);
       button.disabled = false;
     }
   });
@@ -1616,6 +1866,7 @@ function bootRoadmapApp(attempt = 0) {
   }
   if (window.roadmapData && typeof window.roadmapData === "object") {
     appState.baseData = window.roadmapData;
+    initBoardHeaderControls();
     render(appState.baseData);
     initManifestControls();
     initExportControls();
@@ -1635,3 +1886,5 @@ function bootRoadmapApp(attempt = 0) {
 }
 
 bootRoadmapApp();
+
+export {};

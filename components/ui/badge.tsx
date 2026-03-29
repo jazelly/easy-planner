@@ -1,5 +1,6 @@
 import * as React from "react";
-import { cva } from "class-variance-authority";
+import { cva, type VariantProps } from "class-variance-authority";
+
 import { cn } from "@/lib/utils";
 
 const badgeVariants = cva(
@@ -19,7 +20,9 @@ const badgeVariants = cva(
   }
 );
 
-function Badge({ className, variant, ...props }) {
+type BadgeProps = React.ComponentProps<"span"> & VariantProps<typeof badgeVariants>;
+
+function Badge({ className, variant, ...props }: BadgeProps) {
   return (
     <span
       data-slot="badge"

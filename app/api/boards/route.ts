@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { createBoard, listBoards } from "../../lib/version-store";
+
+import { createBoard, listBoards, type BoardRecord } from "../../lib/version-store";
 
 export const runtime = "nodejs";
 
-function toPublicBoard(board) {
+function toPublicBoard(board: BoardRecord) {
   return {
     id: board.id,
-    createdAt: board.createdAt
+    name: board.name || "Untitled board",
+    createdAt: board.createdAt,
+    updatedAt: board.updatedAt
   };
 }
 
@@ -26,11 +29,12 @@ export async function GET() {
 export async function POST() {
   try {
     const boardId = randomUUID();
-    await createBoard(boardId);
+    await createBoard(boardId, "Untitled board");
     return Response.json({
       ok: true,
       board: {
-        id: boardId
+        id: boardId,
+        name: "Untitled board"
       }
     });
   } catch (error) {
