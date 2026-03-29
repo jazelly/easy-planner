@@ -6,7 +6,8 @@ import {
   listManifestVersions,
   upsertBoardAutosave,
   upsertManifestVersionRecord
-} from "../../lib/version-store";
+} from "../../lib/roadmap-repository";
+import { z } from "zod";
 
 const MANIFEST_PREFIX = "roadmap-manifest-v";
 const MANIFEST_SUFFIX = ".json";
@@ -21,17 +22,22 @@ type ManifestPayload = {
   savedAt?: string;
 };
 
+const boardIdSchema = z.string().trim().regex(SAFE_BOARD_ID_RE, "A valid boardId is required.");
+const requestedNameSchema = z.string().trim().regex(SAFE_FILE_RE, "Invalid manifest file name.");
+const manifestSchema = z.object({
+  schemaVersion: z.number().int().optional(),
+  savedAt: z.string().optional()
+}).passthrough();
+const manifestPostSchema = z.object({
+  boardId: boardIdSchema,
+  manifest: manifestSchema,
+  mode: z.string().optional(),
+  thumbnailDataUrl: z.string().optional()
+});
+
 function buildManifestFilename(nextVersion: number) {
   const stamp = new Date().toISOString().replace(/[-:.]/g, "").replace("T", "-").replace("Z", "Z");
   return `${MANIFEST_PREFIX}${String(nextVersion).padStart(4, "0")}-${stamp}${MANIFEST_SUFFIX}`;
-}
-
-function isSafeFileName(value: unknown) {
-  return SAFE_FILE_RE.test(String(value || ""));
-}
-
-function isSafeBoardId(value: unknown) {
-  return SAFE_BOARD_ID_RE.test(String(value || ""));
 }
 
 function toPublicEntry(entry: {
@@ -53,10 +59,11 @@ function toPublicEntry(entry: {
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const boardId = String(searchParams.get("boardId") || "").trim();
-    if (!boardId || !isSafeBoardId(boardId)) {
-      return Response.json({ error: "A valid boardId is required." }, { status: 400 });
+    const boardIdResult = boardIdSchema.safeParse(searchParams.get("boardId") || "");
+    if (!boardIdResult.success) {
+      return Response.json({ error: boardIdResult.error.issues[0]?.message || "A valid boardId is required." }, { status: 400 });
     }
+    const boardId = boardIdResult.data;
 
     const requestedName = String(searchParams.get("name") || "").trim();
     const autosaveMode = String(searchParams.get("autosave") || "").trim() === "1";
@@ -79,7 +86,8 @@ export async function GET(request: Request) {
     }
 
     if (requestedName) {
-      if (!isSafeFileName(requestedName) || !requestedName.startsWith(MANIFEST_PREFIX)) {
+      const requestedNameResult = requestedNameSchema.safeParse(requestedName);
+      if (!requestedNameResult.success || !requestedName.startsWith(MANIFEST_PREFIX)) {
         return Response.json({ error: "Invalid manifest file name." }, { status: 400 });
       }
       const manifestEntry = await getManifestVersionByName(boardId, requestedName);
@@ -113,22 +121,17 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const payload: {
-      boardId?: string;
-      manifest?: ManifestPayload;
-      mode?: string;
-      thumbnailDataUrl?: string;
-    } = await request.json();
-    const boardId = String(payload?.boardId || "").trim();
-    if (!boardId || !isSafeBoardId(boardId)) {
-      return Response.json({ error: "A valid boardId is required." }, { status: 400 });
+    const payload: unknown = await request.json().catch(() => ({}));
+    const parsedPayload = manifestPostSchema.safeParse(payload);
+    if (!parsedPayload.success) {
+      const message = parsedPayload.error.issues[0]?.message || "Invalid manifest payload.";
+      return Response.json({ error: message }, { status: 400 });
     }
-    const manifest = payload?.manifest;
-    const mode = String(payload?.mode || "manual").trim().toLowerCase();
-    const thumbnailDataUrl = payload?.thumbnailDataUrl;
-    if (!manifest || typeof manifest !== "object") {
-      return Response.json({ error: "Manifest payload is required." }, { status: 400 });
-    }
+    const boardId = parsedPayload.data.boardId;
+    const manifest = parsedPayload.data.manifest;
+    const mode = String(parsedPayload.data.mode || "manual").trim().toLowerCase();
+    const thumbnailDataUrl = parsedPayload.data.thumbnailDataUrl;
+
     if (manifest.schemaVersion && manifest.schemaVersion !== SCHEMA_VERSION) {
       return Response.json({ error: "Unsupported manifest schema version." }, { status: 400 });
     }

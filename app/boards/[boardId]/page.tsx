@@ -125,7 +125,6 @@ export default async function BoardPage({ params }: BoardPageProps) {
         <div id="details-content" className="details-content"></div>
       </aside>
 
-      <Script src="/api/legacy/roadmap-data.js" strategy="afterInteractive" />
       <Script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js" strategy="afterInteractive" />
       <RoadmapBootstrap />
     </>

@@ -1309,8 +1309,12 @@ function setBoardNameSaveStatus(state, label = "") {
   statusEl.dataset.state = state;
 }
 
-async function fetchBoardMeta() {
-  const response = await fetch(`/api/boards/${encodeURIComponent(appState.boardId)}`, { cache: "no-store" });
+async function fetchBoardMeta(includeSnapshot = false) {
+  const params = new URLSearchParams();
+  if (includeSnapshot) params.set("includeSnapshot", "1");
+  const query = params.toString();
+  const url = `/api/boards/${encodeURIComponent(appState.boardId)}${query ? `?${query}` : ""}`;
+  const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) {
     let message = `Failed to load board metadata (${response.status})`;
     try {
@@ -1411,19 +1415,11 @@ function initBoardHeaderControls() {
   });
 
   input.dataset.bound = "true";
-  setBoardNameSaveStatus("saving", "Loading...");
-  void fetchBoardMeta()
-    .then((board) => {
-      const nextName = String(board?.name || "Untitled board").trim() || "Untitled board";
-      appState.boardName = nextName;
-      lastCommittedName = nextName;
-      input.value = nextName;
-      setBoardNameSaveStatus("saved", "Saved");
-    })
-    .catch((error) => {
-      const message = error instanceof Error ? error.message : "Failed to load board name.";
-      setBoardNameSaveStatus("error", message);
-    });
+  const nextName = String(appState.boardName || "Untitled board").trim() || "Untitled board";
+  appState.boardName = nextName;
+  lastCommittedName = nextName;
+  input.value = nextName;
+  setBoardNameSaveStatus("saved", "Saved");
 }
 
 function getCurrentLayoutSignature() {
@@ -1752,7 +1748,7 @@ function resetLayoutToBaseline() {
   render(appState.baseData);
   updateManifestHistorySelect();
   renderVersionDashboard();
-  setManifestStatus("Layout reset to baseline algorithm output from roadmap-data.js.");
+  setManifestStatus("Layout reset to baseline board data.");
   markCurrentLayoutAsSaved();
 }
 
@@ -1852,39 +1848,45 @@ function initExportControls() {
   button.dataset.bound = "true";
 }
 
-function bootRoadmapApp(attempt = 0) {
+function showBootError(message) {
+  const errorsEl = document.getElementById("errors");
+  if (errorsEl) {
+    errorsEl.classList.remove("hidden");
+    errorsEl.textContent = message;
+  }
+}
+
+async function bootRoadmapApp() {
   if (!appState.boardId) {
     appState.boardId = getBoardIdFromPath();
   }
   if (!appState.boardId) {
-    const errorsEl = document.getElementById("errors");
-    if (errorsEl) {
-      errorsEl.classList.remove("hidden");
-      errorsEl.textContent = "Missing board ID in URL.";
+    showBootError("Missing board ID in URL.");
+    return;
+  }
+  try {
+    const board = await fetchBoardMeta(true);
+    appState.boardName = String(board?.name || "Untitled board").trim() || "Untitled board";
+    if (!board?.baseData || typeof board.baseData !== "object") {
+      throw new Error("Board data is unavailable.");
     }
-    return;
-  }
-  if (window.roadmapData && typeof window.roadmapData === "object") {
-    appState.baseData = window.roadmapData;
-    initBoardHeaderControls();
-    render(appState.baseData);
-    initManifestControls();
-    initExportControls();
-    return;
-  }
-
-  if (attempt >= 100) {
-    const errorsEl = document.getElementById("errors");
-    if (errorsEl) {
-      errorsEl.classList.remove("hidden");
-      errorsEl.textContent = "Roadmap data failed to load. Please refresh the page.";
+    appState.baseData = board.baseData;
+    const latestManifest = board?.latestManifest;
+    if (latestManifest && typeof latestManifest === "object") {
+      appState.activeManifest = latestManifest;
+      appState.currentManifestFileName = String(board?.latestManifestFileName || "").trim();
     }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load board.";
+    showBootError(message);
     return;
   }
-
-  window.setTimeout(() => bootRoadmapApp(attempt + 1), 50);
+  initBoardHeaderControls();
+  render(appState.baseData, appState.activeManifest ? { layoutManifest: appState.activeManifest } : undefined);
+  initManifestControls();
+  initExportControls();
 }
 
-bootRoadmapApp();
+void bootRoadmapApp();
 
 export {};

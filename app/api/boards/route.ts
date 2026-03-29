@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { createBoard, listBoards, type BoardRecord } from "../../lib/version-store";
+import { createBoard, listBoards, type BoardRecord } from "../../lib/roadmap-repository";
 
 export const runtime = "nodejs";
 
