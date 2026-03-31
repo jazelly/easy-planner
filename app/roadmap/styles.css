@@ -424,6 +424,41 @@ body {
   padding-left: 56px;
 }
 
+.board-stage {
+  position: relative;
+  min-height: 320px;
+}
+
+.board-wrap.board-wrap-loading {
+  visibility: hidden;
+}
+
+.board-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  z-index: 2;
+}
+
+.board-loading-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 2px solid #cbd5e1;
+  border-right-color: #2563eb;
+  animation: spin 700ms linear infinite;
+}
+
+.board-loading-label {
+  font-size: 13px;
+  color: #334155;
+  font-weight: 600;
+}
+
 .board {
   position: relative;
   min-width: 100%;

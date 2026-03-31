@@ -1,24 +1,37 @@
-const sizeToWeeks = {
-  XS: 1, S: 2, M: 4, L: 6, XL: 8
-};
+// @ts-nocheck
 
-const laneColor = {
-  BA: "#f59e0b",
-  DESIGN: "#8b5cf6",
-  DEV: "#2563eb",
-  QA: "#16a34a"
-};
-
-const typeLabel = {
-  BA: "BA",
-  DESIGN: "Design",
-  DEV: "Dev",
-  QA: "QA"
-};
+import {
+  addWeeks,
+  buildMonthSpans,
+  buildTracks,
+  clamp,
+  formatWeekLabel,
+  formatWeekRangeLabel,
+  laneColor,
+  normalizeStatus,
+  scheduleTasks,
+  toDate,
+  toFiniteNumber,
+  toStatusClass,
+  typeLabel
+} from "./scheduling";
+import { buildTaskDetailsHtml, initDetailsSidebar } from "./details";
+import {
+  captureBoardCanvas,
+  captureBoardThumbnailDataUrl,
+  exportMultiSlice,
+  exportSingleFit
+} from "./export-utils";
+import {
+  applyCardUiPosition,
+  clearChildren,
+  getWeekColumnWidth,
+  relayoutCardsLayer,
+  sortCardsForRow,
+  updateCardMetaForUiPosition
+} from "./layout-utils";
 
 const MANIFEST_SCHEMA_VERSION = 1;
-const THUMBNAIL_MAX_WIDTH = 480;
-const THUMBNAIL_MAX_HEIGHT = 270;
 
 const appState = {
   baseData: null,
@@ -35,287 +48,11 @@ const appState = {
   boardNameSaveTimer: null,
   boardNameSaveSeq: 0,
   autosaveTimer: null,
-  autosaveSeq: 0
+  autosaveSeq: 0,
+  initialLoadingPending: true,
+  latestRenderSeq: 0,
+  settledRenderSeq: 0
 };
-
-function normalizeStatus(status) {
-  const normalized = String(status || "NEW").trim().toUpperCase();
-  const allowed = new Set(["NEW", "DELIVERY", "RELEASED", "IN_PROGRESS", "BLOCKED"]);
-  return allowed.has(normalized) ? normalized : "NEW";
-}
-
-function toStatusClass(status) {
-  return `task-status-${status.toLowerCase().replaceAll("_", "-")}`;
-}
-
-function formatWeekLabel(weekIndex) {
-  return weekIndex >= 0 ? `W${weekIndex + 1}` : `B${Math.abs(weekIndex)}`;
-}
-
-function formatWeekRangeLabel(startWeek, endWeekExclusive) {
-  const inclusiveEndWeek = endWeekExclusive - 1;
-  return `${formatWeekLabel(startWeek)}-${formatWeekLabel(inclusiveEndWeek)}`;
-}
-
-function toDate(isoDate) {
-  const d = new Date(isoDate + "T00:00:00");
-  if (Number.isNaN(d.getTime())) {
-    throw new Error("Invalid date: " + isoDate);
-  }
-  return d;
-}
-
-function formatMonthLabel(date) {
-  return date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
-}
-
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-function addWeeks(date, weeks) {
-  const d = new Date(date);
-  d.setDate(d.getDate() + weeks * 7);
-  return d;
-}
-
-function topologicalSort(tasks) {
-  const byId = new Map(tasks.map(t => [t.id, t]));
-  const inDegree = new Map(tasks.map(t => [t.id, 0]));
-  const adj = new Map(tasks.map(t => [t.id, []]));
-
-  for (const t of tasks) {
-    for (const dep of t.dependsOn || []) {
-      if (!byId.has(dep)) {
-        throw new Error(`Task ${t.id} depends on missing task ${dep}`);
-      }
-      inDegree.set(t.id, inDegree.get(t.id) + 1);
-      adj.get(dep).push(t.id);
-    }
-  }
-
-  const ready = [];
-  for (const [id, degree] of inDegree.entries()) {
-    if (degree === 0) ready.push(id);
-  }
-  ready.sort((a, b) => byId.get(a).priorityOrder - byId.get(b).priorityOrder);
-
-  const order = [];
-  while (ready.length > 0) {
-    // Pick the highest-priority ready task first.
-    const id = ready.shift();
-    order.push(id);
-    for (const nxt of adj.get(id)) {
-      const deg = inDegree.get(nxt) - 1;
-      inDegree.set(nxt, deg);
-      if (deg === 0) {
-        ready.push(nxt);
-        ready.sort((a, b) => byId.get(a).priorityOrder - byId.get(b).priorityOrder);
-      }
-    }
-  }
-
-  if (order.length !== tasks.length) {
-    throw new Error("Dependency cycle detected.");
-  }
-  return order.map(id => byId.get(id));
-}
-
-function overlaps(aStart, aEnd, bStart, bEnd) {
-  return aStart < bEnd && bStart < aEnd;
-}
-
-function countOverlappingByType(type, startWeek, endWeek, scheduled) {
-  let count = 0;
-  for (const s of scheduled) {
-    if (s.type === type && overlaps(startWeek, endWeek, s.startWeek, s.endWeek)) {
-      count++;
-    }
-  }
-  return count;
-}
-
-function normalizeTask(task, priorityOrder) {
-  return {
-    ...task,
-    dependsOn: task.dependsOn || [],
-    earliestWeek: task.earliestWeek || 0,
-    priorityOrder
-  };
-}
-
-function buildCadenceDependencies(tasks) {
-  const phaseOrder = ["BA", "DESIGN", "DEV", "QA"];
-  const phaseIndex = new Map(phaseOrder.map((phase, idx) => [phase, idx]));
-  const tasksByName = new Map();
-  const tasksById = new Map();
-  const mergedTasks = tasks.map((task, index) => normalizeTask(task, index));
-
-  for (const task of mergedTasks) {
-    if (!phaseIndex.has(task.type)) {
-      throw new Error(`Task ${task.id} has unknown type/lane ${task.type}`);
-    }
-    tasksById.set(task.id, task);
-    if (!tasksByName.has(task.name)) tasksByName.set(task.name, []);
-    tasksByName.get(task.name).push(task);
-  }
-
-  for (const [name, group] of tasksByName.entries()) {
-    const seenTypes = new Set();
-    for (const task of group) {
-      if (seenTypes.has(task.type)) {
-        throw new Error(`Cadence violation for "${name}": duplicate phase ${task.type}`);
-      }
-      seenTypes.add(task.type);
-    }
-
-    const ordered = [...group].sort((a, b) => phaseIndex.get(a.type) - phaseIndex.get(b.type));
-    for (let i = 0; i < ordered.length - 1; i++) {
-      const from = ordered[i];
-      const to = ordered[i + 1];
-      const fromIdx = phaseIndex.get(from.type);
-      const toIdx = phaseIndex.get(to.type);
-      if (toIdx <= fromIdx) {
-        throw new Error(`Cadence violation for "${name}": phases must move forward`);
-      }
-      if (!to.dependsOn.includes(from.id)) {
-        to.dependsOn.push(from.id);
-      }
-    }
-  }
-
-  for (const task of mergedTasks) {
-    for (const depId of task.dependsOn) {
-      if (!tasksById.has(depId)) {
-        throw new Error(`Task ${task.id} depends on missing task ${depId}`);
-      }
-    }
-  }
-
-  return mergedTasks;
-}
-
-function computeWindowMaxWeeks(startDate, constraints) {
-  const windowEndDate = constraints?.windowEndDate;
-  if (!windowEndDate) return null;
-  const endDate = toDate(windowEndDate);
-  if (endDate.getTime() < startDate.getTime()) {
-    throw new Error("constraints.windowEndDate must be on or after startDate.");
-  }
-
-  // Inclusive end date: a window ending Friday should include that whole week.
-  const inclusiveMs = (endDate.getTime() - startDate.getTime()) + DAY_MS;
-  return Math.ceil(inclusiveMs / WEEK_MS);
-}
-
-function scheduleTasks(data, startDate) {
-  const tasksWithCadence = buildCadenceDependencies(data.tasks);
-  const tasks = topologicalSort(tasksWithCadence);
-  const scheduled = [];
-  const overflowTaskIds = [];
-  const allowedTypes = new Set(["BA", "DESIGN", "DEV", "QA"]);
-  const perTypeCap = data.constraints?.maxParallelByType || {
-    BA: 2,
-    DESIGN: 2,
-    DEV: 2,
-    QA: 2
-  };
-  const maxWeeksInWindow = computeWindowMaxWeeks(startDate, data.constraints);
-
-  for (const task of tasks) {
-    const duration = sizeToWeeks[task.size];
-    if (!duration) throw new Error(`Task ${task.id} has invalid size ${task.size}`);
-    if (!allowedTypes.has(task.type)) throw new Error(`Task ${task.id} has unknown type/lane ${task.type}`);
-
-    let earliest = task.earliestWeek;
-    for (const depId of (task.dependsOn || [])) {
-      const dep = scheduled.find(s => s.id === depId);
-      if (!dep) throw new Error(`Internal scheduling error: missing dependency ${depId}`);
-      earliest = Math.max(earliest, dep.endWeek);
-    }
-
-    let startWeek = earliest;
-    const endWeek = () => startWeek + duration;
-    const typeCap = perTypeCap[task.type] ?? 2;
-
-    while (countOverlappingByType(task.type, startWeek, endWeek(), scheduled) >= typeCap) {
-      startWeek++;
-    }
-    const exceedsWindow = maxWeeksInWindow !== null && endWeek() > maxWeeksInWindow;
-    if (exceedsWindow) overflowTaskIds.push(task.id);
-
-    scheduled.push({
-      id: task.id,
-      name: task.name,
-      type: task.type,
-      size: task.size,
-      priorityOrder: task.priorityOrder,
-      status: normalizeStatus(task.status),
-      assignee: task.assignee || "Unavailable",
-      notes: task.notes || "",
-      dependsOn: task.dependsOn || [],
-      startWeek,
-      endWeek: endWeek(),
-      exceedsWindow
-    });
-  }
-
-  return {
-    scheduled,
-    window: {
-      maxWeeksInWindow,
-      overflowTaskIds
-    }
-  };
-}
-
-function buildTracks(scheduled) {
-  function extractOkrOrderFromTask(task) {
-    const idMatch = String(task?.id || "").match(/OKR-(\d+)/i);
-    if (idMatch) {
-      const idOrder = Number.parseInt(idMatch[1], 10);
-      if (Number.isFinite(idOrder)) return idOrder;
-    }
-    const nameMatch = String(task?.name || "").match(/\bOKR\s*[- ]?(\d+)\b/i);
-    if (nameMatch) {
-      const nameOrder = Number.parseInt(nameMatch[1], 10);
-      if (Number.isFinite(nameOrder)) return nameOrder;
-    }
-    return Number.POSITIVE_INFINITY;
-  }
-
-  const groupsByName = new Map();
-  for (const task of scheduled) {
-    const key = String(task.name || task.id || "");
-    if (!groupsByName.has(key)) groupsByName.set(key, []);
-    groupsByName.get(key).push(task);
-  }
-
-  const tracks = Array.from(groupsByName.entries()).map(([name, tasks]) => {
-    const orderedTasks = [...tasks].sort((a, b) => {
-      if (a.startWeek !== b.startWeek) return a.startWeek - b.startWeek;
-      if (a.endWeek !== b.endWeek) return a.endWeek - b.endWeek;
-      return a.id.localeCompare(b.id);
-    });
-    const okrOrder = orderedTasks.reduce((min, task) => {
-      return Math.min(min, extractOkrOrderFromTask(task));
-    }, Number.POSITIVE_INFINITY);
-    const earliestStart = orderedTasks.length > 0 ? orderedTasks[0].startWeek : Number.POSITIVE_INFINITY;
-    return { name, okrOrder, earliestStart, tasks: orderedTasks };
-  });
-
-  tracks.sort((a, b) => {
-    if (a.okrOrder !== b.okrOrder) return a.okrOrder - b.okrOrder;
-    if (a.earliestStart !== b.earliestStart) return a.earliestStart - b.earliestStart;
-    return a.name.localeCompare(b.name);
-  });
-
-  return tracks.map((track) => track.tasks);
-}
-
-function toFiniteNumber(value, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
 
 function parseManifestVersionNumber(filename) {
   const match = String(filename || "").match(/-v(\d+)-/i);
@@ -327,18 +64,6 @@ function parseManifestVersionNumber(filename) {
 function buildManifestFilename(nextVersion) {
   const stamp = new Date().toISOString().replace(/[-:.]/g, "").replace("T", "-").replace("Z", "Z");
   return `roadmap-manifest-v${String(nextVersion).padStart(4, "0")}-${stamp}.json`;
-}
-
-function sortCardsForRow(cards) {
-  return [...cards].sort((a, b) => {
-    const aStart = toFiniteNumber(a.dataset.uiStartWeek, 0);
-    const bStart = toFiniteNumber(b.dataset.uiStartWeek, 0);
-    if (aStart !== bStart) return aStart - bStart;
-    const aLane = toFiniteNumber(a.dataset.laneIndex, 0);
-    const bLane = toFiniteNumber(b.dataset.laneIndex, 0);
-    if (aLane !== bLane) return aLane - bLane;
-    return String(a.dataset.taskId || "").localeCompare(String(b.dataset.taskId || ""));
-  });
 }
 
 function createLayoutManifest(data) {
@@ -420,112 +145,6 @@ function applyManifestToTracks(scheduled, manifest, minStartWeek, maxEndWeekExcl
   }
 
   return tracks;
-}
-
-function buildMonthSpans(startDate, totalWeeks, startWeekOffset = 0) {
-  const spans = [];
-  let week = 0;
-
-  while (week < totalWeeks) {
-    const currentDate = addWeeks(startDate, startWeekOffset + week);
-    const monthLabel = formatMonthLabel(currentDate);
-    let spanWeeks = 1;
-    while (week + spanWeeks < totalWeeks) {
-      const nextDate = addWeeks(startDate, startWeekOffset + week + spanWeeks);
-      if (formatMonthLabel(nextDate) !== monthLabel) break;
-      spanWeeks++;
-    }
-    spans.push({ monthLabel, startWeek: week, spanWeeks });
-    week += spanWeeks;
-  }
-  return spans;
-}
-
-function clearChildren(node) {
-  while (node.firstChild) node.removeChild(node.firstChild);
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function getWeekColumnWidth(board) {
-  const raw = getComputedStyle(board).getPropertyValue("--week-col-width").trim();
-  const parsed = Number.parseFloat(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 132;
-}
-
-function applyCardUiPosition(card, startWeek, duration, visibleStartWeek = 0) {
-  const columnIndex = startWeek - visibleStartWeek;
-  card.style.left = `calc(${columnIndex} * var(--week-col-width) + 2px)`;
-  card.style.width = `calc(${duration} * var(--week-col-width) - 4px)`;
-  card.dataset.uiStartWeek = String(startWeek);
-  card.dataset.uiEndWeek = String(startWeek + duration);
-}
-
-function updateCardMetaForUiPosition(card, task, startWeek, endWeek) {
-  const duration = endWeek - startWeek;
-  const weekRange = formatWeekRangeLabel(startWeek, endWeek);
-  const metaEl = card.querySelector(".task-meta");
-  if (metaEl) {
-    metaEl.textContent = `${task.size} (${duration}w) • ${weekRange}`;
-  }
-  card.title = `${task.id} | ${task.name}\n${task.type} • ${task.size}\nWeek ${weekRange}`;
-}
-
-function relayoutCardsLayer(cardsLayer, row) {
-  const cards = sortCardsForRow(Array.from(cardsLayer.querySelectorAll(".task-card")));
-  for (const card of cards) cardsLayer.appendChild(card);
-
-  const lanesEndWeek = [];
-  const laneCards = [];
-  const laneHeights = [];
-  const laneTops = [];
-  const cardGap = 8;
-  const rowPaddingTop = 6;
-  const rowPaddingBottom = 6;
-
-  // Pass 1: assign each card to the earliest compatible vertical lane.
-  for (const card of cards) {
-    const start = Number(card.dataset.uiStartWeek || 0);
-    const end = Number(card.dataset.uiEndWeek || start + 1);
-    let laneIndex = 0;
-    while (laneIndex < lanesEndWeek.length && lanesEndWeek[laneIndex] > start) {
-      laneIndex++;
-    }
-    lanesEndWeek[laneIndex] = end;
-    if (!laneCards[laneIndex]) laneCards[laneIndex] = [];
-    laneCards[laneIndex].push(card);
-    card.dataset.laneIndex = String(laneIndex);
-  }
-
-  const stackCount = Math.max(1, laneCards.length);
-
-  // Pass 2: measure actual content-driven height per lane.
-  for (let laneIndex = 0; laneIndex < stackCount; laneIndex++) {
-    const cardsInLane = laneCards[laneIndex] || [];
-    let maxHeight = 0;
-    for (const card of cardsInLane) {
-      const cardHeight = Math.ceil(card.getBoundingClientRect().height);
-      maxHeight = Math.max(maxHeight, cardHeight);
-    }
-    laneHeights[laneIndex] = Math.max(56, maxHeight);
-  }
-
-  // Pass 3: compute lane top offsets and place cards.
-  let runningTop = rowPaddingTop;
-  for (let laneIndex = 0; laneIndex < stackCount; laneIndex++) {
-    laneTops[laneIndex] = runningTop;
-    runningTop += laneHeights[laneIndex] + (laneIndex < stackCount - 1 ? cardGap : 0);
-  }
-
-  for (const card of cards) {
-    const laneIndex = Number(card.dataset.laneIndex || 0);
-    card.style.top = `${laneTops[laneIndex] ?? rowPaddingTop}px`;
-  }
-
-  const totalHeight = runningTop + rowPaddingBottom;
-  row.style.minHeight = `${Math.max(96, totalHeight)}px`;
 }
 
 function enableCardDragAndDrop(
@@ -635,131 +254,8 @@ function enableCardDragAndDrop(
   });
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll("\"", "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function formatPrettyDate(date) {
-  return date.toLocaleDateString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    year: "numeric"
-  });
-}
-
-function initDetailsSidebar() {
-  const sidebar = document.getElementById("details-sidebar");
-  const backdrop = document.getElementById("details-backdrop");
-  const closeBtn = document.getElementById("details-close");
-  const titleEl = document.getElementById("details-title");
-  const contentEl = document.getElementById("details-content");
-
-  if (!sidebar || !backdrop || !closeBtn || !titleEl || !contentEl) {
-    return {
-      open: () => {},
-      close: () => {}
-    };
-  }
-
-  function close() {
-    sidebar.classList.remove("open");
-    sidebar.classList.add("hidden");
-    backdrop.classList.add("hidden");
-    sidebar.setAttribute("aria-hidden", "true");
-    backdrop.setAttribute("aria-hidden", "true");
-  }
-
-  function open(task, detailsHtml) {
-    titleEl.textContent = `${task.id} - ${task.name}`;
-    contentEl.innerHTML = detailsHtml;
-    sidebar.classList.remove("hidden");
-    backdrop.classList.remove("hidden");
-    sidebar.classList.add("open");
-    sidebar.setAttribute("aria-hidden", "false");
-    backdrop.setAttribute("aria-hidden", "false");
-  }
-
-  if (!sidebar.dataset.bound) {
-    closeBtn.addEventListener("click", close);
-    backdrop.addEventListener("click", close);
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") close();
-    });
-    sidebar.dataset.bound = "true";
-  }
-
-  return { open, close };
-}
-
-function buildTaskDetailsHtml(task, scheduledById, startDate) {
-  const durationWeeks = task.endWeek - task.startWeek;
-  const start = addWeeks(startDate, task.startWeek);
-  const endExclusive = addWeeks(startDate, task.endWeek);
-  const endInclusive = new Date(endExclusive);
-  endInclusive.setDate(endInclusive.getDate() - 1);
-
-  const dependencyLines = (task.dependsOn || []).map((id) => {
-    const dep = scheduledById.get(id);
-    if (!dep) return `${id} (missing)`;
-    return `${dep.id} - ${dep.name} (${dep.type})`;
-  });
-
-  const borderColor = laneColor[task.type] || "#94a3b8";
-
-  return `
-    <div class="details-section">
-      <h3>Overview</h3>
-      <div class="details-grid">
-        <div class="details-key">Task ID</div>
-        <div class="details-value">${escapeHtml(task.id)}</div>
-        <div class="details-key">Name</div>
-        <div class="details-value">${escapeHtml(task.name)}</div>
-        <div class="details-key">Phase</div>
-        <div class="details-value">
-          <span class="details-chip" style="border-left: 4px solid ${escapeHtml(borderColor)}">${escapeHtml(task.type)}</span>
-        </div>
-        <div class="details-key">Status</div>
-        <div class="details-value">${escapeHtml(task.status || "NEW")}</div>
-        <div class="details-key">Assignee</div>
-        <div class="details-value">${escapeHtml(task.assignee || "Unavailable")}</div>
-        <div class="details-key">Size</div>
-        <div class="details-value">${escapeHtml(task.size)} (${durationWeeks} week${durationWeeks === 1 ? "" : "s"})</div>
-      </div>
-    </div>
-
-    <div class="details-section">
-      <h3>Schedule</h3>
-      <div class="details-grid">
-        <div class="details-key">Week range</div>
-        <div class="details-value">W${task.startWeek + 1} - W${task.endWeek}</div>
-        <div class="details-key">Start date</div>
-        <div class="details-value">${escapeHtml(formatPrettyDate(start))}</div>
-        <div class="details-key">End date</div>
-        <div class="details-value">${escapeHtml(formatPrettyDate(endInclusive))}</div>
-      </div>
-    </div>
-
-    <div class="details-section">
-      <h3>Dependencies</h3>
-      <div class="details-value">
-        ${dependencyLines.length > 0 ? dependencyLines.map((d) => `<div>${escapeHtml(d)}</div>`).join("") : "No dependencies"}
-      </div>
-    </div>
-
-    <div class="details-section">
-      <h3>Notes</h3>
-      <div class="details-value">${task.notes ? escapeHtml(task.notes) : "No notes provided"}</div>
-    </div>
-  `;
-}
-
 function render(data, options = {}) {
+  const renderSeq = ++appState.latestRenderSeq;
   const layoutManifest = options.layoutManifest || null;
   const board = document.getElementById("board");
   const errorsEl = document.getElementById("errors");
@@ -773,13 +269,13 @@ function render(data, options = {}) {
 
   try {
     const startDate = toDate(data.startDate);
-    const { scheduled, window } = scheduleTasks(data, startDate);
+    const { scheduled, window: scheduleWindow } = scheduleTasks(data, startDate);
     const scheduledById = new Map(scheduled.map((item) => [item.id, item]));
     const dataTotalWeeks = Math.max(...scheduled.map(s => s.endWeek), 0) + 2;
     const leftBufferWeeks = 2;
     const visibleStartWeek = -leftBufferWeeks;
     const visibleWeekCount = dataTotalWeeks + leftBufferWeeks;
-    const maxWeeksInWindow = window?.maxWeeksInWindow ?? null;
+    const maxWeeksInWindow = scheduleWindow?.maxWeeksInWindow ?? null;
 
     board.style.setProperty("--week-count", String(visibleWeekCount));
 
@@ -1084,6 +580,7 @@ function render(data, options = {}) {
       const rowContext = createRowContext(track);
       rowContexts.push(rowContext);
       board.appendChild(rowContext.row);
+      relayoutRowContext(rowContext);
     }
     updateRowContextIndexes();
     updateRowInsertionAffordances();
@@ -1107,110 +604,32 @@ function render(data, options = {}) {
     // async font/layout settling (common after loading a manifest).
     scheduleFrame(() => {
       relayoutAllRowsIfCurrentRender();
-      scheduleFrame(relayoutAllRowsIfCurrentRender);
+      scheduleFrame(async () => {
+        relayoutAllRowsIfCurrentRender();
+        if (document.fonts && document.fonts.ready) {
+          try {
+            await Promise.race([
+              document.fonts.ready,
+              new Promise((resolve) => window.setTimeout(resolve, 450))
+            ]);
+          } catch (_) {
+            // Continue with current layout if font readiness fails.
+          }
+          relayoutAllRowsIfCurrentRender();
+        }
+        if (appState.latestRenderSeq === renderSeq) {
+          appState.settledRenderSeq = renderSeq;
+          maybeRevealBoard();
+        }
+      });
     });
-    if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(relayoutAllRowsIfCurrentRender);
-    }
   } catch (err) {
     errorsEl.classList.remove("hidden");
     errorsEl.textContent = "Data validation/scheduling error: " + err.message;
-  }
-}
-
-function makeExportFilename(prefix, suffix = "") {
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return `${prefix}${suffix ? `-${suffix}` : ""}-${stamp}.png`;
-}
-
-function downloadCanvas(canvas, filename) {
-  const link = document.createElement("a");
-  link.href = canvas.toDataURL("image/png");
-  link.download = filename;
-  link.click();
-}
-
-async function captureBoardCanvas(board) {
-  if (typeof window.html2canvas !== "function") {
-    throw new Error("Export library unavailable. Please refresh and try again.");
-  }
-  const rect = board.getBoundingClientRect();
-  const captureScale = Math.max(1, Math.min(2, 7680 / Math.max(rect.width, 1)));
-  return window.html2canvas(board, {
-    backgroundColor: "#ffffff",
-    useCORS: true,
-    scale: captureScale,
-    logging: false
-  });
-}
-
-async function captureBoardThumbnailDataUrl(board) {
-  if (typeof window.html2canvas !== "function") return null;
-  const source = await window.html2canvas(board, {
-    backgroundColor: "#ffffff",
-    useCORS: true,
-    scale: 1,
-    logging: false
-  });
-  const scale = Math.min(
-    1,
-    THUMBNAIL_MAX_WIDTH / Math.max(source.width, 1),
-    THUMBNAIL_MAX_HEIGHT / Math.max(source.height, 1)
-  );
-  const width = Math.max(1, Math.round(source.width * scale));
-  const height = Math.max(1, Math.round(source.height * scale));
-  const target = document.createElement("canvas");
-  target.width = width;
-  target.height = height;
-  const ctx = target.getContext("2d");
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, width, height);
-  ctx.drawImage(source, 0, 0, width, height);
-  return target.toDataURL("image/png", 0.82);
-}
-
-function buildTargetCanvas(width, height) {
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, width, height);
-  return { canvas, ctx };
-}
-
-function exportSingleFit(sourceCanvas) {
-  const targetWidth = 7680;
-  const targetHeight = 4320;
-  const { canvas, ctx } = buildTargetCanvas(targetWidth, targetHeight);
-
-  const scale = Math.min(targetWidth / sourceCanvas.width, targetHeight / sourceCanvas.height);
-  const drawW = sourceCanvas.width * scale;
-  const drawH = sourceCanvas.height * scale;
-  const drawX = (targetWidth - drawW) / 2;
-  const drawY = (targetHeight - drawH) / 2;
-
-  ctx.drawImage(sourceCanvas, drawX, drawY, drawW, drawH);
-  downloadCanvas(canvas, makeExportFilename("roadmap-fit-8k"));
-}
-
-function exportMultiSlice(sourceCanvas) {
-  const targetWidth = 7680;
-  const targetHeight = 4320;
-  const ratio = targetWidth / targetHeight;
-  const fullSrcHeight = sourceCanvas.height;
-  const maxSliceSrcWidth = fullSrcHeight * ratio;
-  const sliceSrcWidth = Math.min(sourceCanvas.width, maxSliceSrcWidth);
-  const sliceCount = Math.max(1, Math.ceil(sourceCanvas.width / sliceSrcWidth));
-
-  for (let i = 0; i < sliceCount; i++) {
-    const srcX = i * sliceSrcWidth;
-    const srcW = Math.min(sliceSrcWidth, sourceCanvas.width - srcX);
-    const { canvas, ctx } = buildTargetCanvas(targetWidth, targetHeight);
-    const drawW = targetHeight * (srcW / fullSrcHeight);
-    const drawX = (targetWidth - drawW) / 2;
-    ctx.drawImage(sourceCanvas, srcX, 0, srcW, fullSrcHeight, drawX, 0, drawW, targetHeight);
-    downloadCanvas(canvas, makeExportFilename("roadmap-slice-8k", `${String(i + 1).padStart(2, "0")}of${String(sliceCount).padStart(2, "0")}`));
+    if (appState.latestRenderSeq === renderSeq) {
+      appState.settledRenderSeq = renderSeq;
+      maybeRevealBoard();
+    }
   }
 }
 
@@ -1236,6 +655,32 @@ function getVersionDashboardListElement() {
 
 function getToastHostElement() {
   return document.getElementById("toast-host");
+}
+
+function getBoardWrapElement() {
+  return document.getElementById("board-wrap");
+}
+
+function getBoardLoadingElement() {
+  return document.getElementById("board-loading");
+}
+
+function setBoardLoading(isLoading) {
+  const boardWrap = getBoardWrapElement();
+  const loadingEl = getBoardLoadingElement();
+  if (boardWrap) {
+    boardWrap.classList.toggle("board-wrap-loading", Boolean(isLoading));
+    boardWrap.setAttribute("aria-busy", String(Boolean(isLoading)));
+  }
+  if (loadingEl) {
+    loadingEl.classList.toggle("hidden", !isLoading);
+  }
+}
+
+function maybeRevealBoard() {
+  if (appState.initialLoadingPending) return;
+  if (appState.settledRenderSeq !== appState.latestRenderSeq) return;
+  setBoardLoading(false);
 }
 
 function setManifestStatus(message) {
@@ -1757,8 +1202,8 @@ function initManifestControls() {
   const loadBtn = document.getElementById("load-manifest-btn");
   const resetBtn = document.getElementById("reset-layout-btn");
 
-  if (!saveBtn || !resetBtn) return;
-  if (saveBtn.dataset.bound === "true") return;
+  if (!saveBtn || !resetBtn) return Promise.resolve();
+  if (saveBtn.dataset.bound === "true") return Promise.resolve();
 
   saveBtn.addEventListener("click", async () => {
     saveBtn.disabled = true;
@@ -1792,7 +1237,7 @@ function initManifestControls() {
     resetLayoutToBaseline();
   });
 
-  (async () => {
+  const initialLoadPromise = (async () => {
     try {
       await refreshManifestEntries();
       const manifestFromQuery = getManifestFromQueryParam();
@@ -1808,6 +1253,7 @@ function initManifestControls() {
     }
   })();
   saveBtn.dataset.bound = "true";
+  return initialLoadPromise;
 }
 
 function initExportControls() {
@@ -1857,10 +1303,13 @@ function showBootError(message) {
 }
 
 async function bootRoadmapApp() {
+  setBoardLoading(true);
+  appState.initialLoadingPending = true;
   if (!appState.boardId) {
     appState.boardId = getBoardIdFromPath();
   }
   if (!appState.boardId) {
+    setBoardLoading(false);
     showBootError("Missing board ID in URL.");
     return;
   }
@@ -1877,14 +1326,17 @@ async function bootRoadmapApp() {
       appState.currentManifestFileName = String(board?.latestManifestFileName || "").trim();
     }
   } catch (error) {
+    setBoardLoading(false);
     const message = error instanceof Error ? error.message : "Failed to load board.";
     showBootError(message);
     return;
   }
   initBoardHeaderControls();
   render(appState.baseData, appState.activeManifest ? { layoutManifest: appState.activeManifest } : undefined);
-  initManifestControls();
+  await initManifestControls();
   initExportControls();
+  appState.initialLoadingPending = false;
+  maybeRevealBoard();
 }
 
 void bootRoadmapApp();

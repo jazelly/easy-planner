@@ -17,8 +17,8 @@ async function getSqliteColumnNames(queryRunner: QueryRunner, tableName: string)
   return new Set(rows.map((row) => String(row?.name || "")));
 }
 
-export class InitSchema0001 implements MigrationInterface {
-  name = "InitSchema0001";
+export class InitSchema00011743408600000 implements MigrationInterface {
+  name = "InitSchema00011743408600000";
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     const provider = asProvider(queryRunner.connection.options.type);

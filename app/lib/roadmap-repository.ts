@@ -3,7 +3,7 @@ import path from "node:path";
 import type { DataSourceOptions } from "typeorm";
 import { DataSource, EntitySchema } from "typeorm";
 
-import { InitSchema0001 } from "./db/migrations/0001-init";
+import { InitSchema00011743408600000 } from "./db/migrations/0001-init";
 import { getDefaultRoadmapData, type RoadmapData } from "./default-roadmap-data";
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -140,7 +140,7 @@ function resolveDbProvider(): SupportedDbProvider {
 function createDataSourceOptions(provider: SupportedDbProvider): DataSourceOptions {
   const sharedConfig = {
     entities: [BoardSchema, BoardHistorySchema, BoardAutosaveSchema],
-    migrations: [InitSchema0001],
+    migrations: [InitSchema00011743408600000],
     migrationsTableName: "schema_migrations",
     synchronize: false,
     logging: false

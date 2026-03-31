@@ -1,5 +1,5 @@
 import "./globals.css";
-import "./roadmap.css";
+import "./roadmap/styles.css";
 
 import type { Metadata } from "next";
 import type { ReactNode } from "react";

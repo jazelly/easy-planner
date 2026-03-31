@@ -5,7 +5,7 @@ import { DoorOpen, Download, RotateCcw, Save, SlidersHorizontal } from "lucide-r
 
 import { Button } from "@/components/ui/button";
 
-import RoadmapBootstrap from "../../roadmap-bootstrap";
+import RoadmapBootstrap from "../../roadmap/bootstrap";
 
 const SAFE_BOARD_ID_RE = /^[a-z0-9-]+$/i;
 
@@ -102,8 +102,14 @@ export default async function BoardPage({ params }: BoardPageProps) {
             Open last saved manifest
           </a>
         </div>
-        <div className="board-wrap">
-          <div id="board" className="board"></div>
+        <div className="board-stage">
+          <div id="board-loading" className="board-loading" role="status" aria-live="polite">
+            <span className="board-loading-spinner" aria-hidden="true"></span>
+            <span className="board-loading-label">Loading board...</span>
+          </div>
+          <div id="board-wrap" className="board-wrap board-wrap-loading" aria-busy="true">
+            <div id="board" className="board"></div>
+          </div>
         </div>
         <div id="errors" className="errors hidden"></div>
         <div id="toast-host" className="toast-host" aria-live="polite" aria-atomic="true"></div>
