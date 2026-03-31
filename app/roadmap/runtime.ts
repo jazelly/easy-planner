@@ -49,6 +49,7 @@ const appState = {
   boardNameSaveSeq: 0,
   autosaveTimer: null,
   autosaveSeq: 0,
+  edgeControlsRaf: 0,
   initialLoadingPending: true,
   latestRenderSeq: 0,
   settledRenderSeq: 0
@@ -258,9 +259,12 @@ function render(data, options = {}) {
   const renderSeq = ++appState.latestRenderSeq;
   const layoutManifest = options.layoutManifest || null;
   const board = document.getElementById("board");
+  const boardWrap = getBoardWrapElement();
+  const edgeControlsLayer = getBoardEdgeControlsElement();
   const errorsEl = document.getElementById("errors");
   const detailsSidebar = initDetailsSidebar();
   clearChildren(board);
+  if (edgeControlsLayer) clearChildren(edgeControlsLayer);
   appState.rowContexts = [];
   appState.boardBounds = null;
   errorsEl.classList.add("hidden");
@@ -312,9 +316,55 @@ function render(data, options = {}) {
     const tracks = applyManifestToTracks(scheduled, layoutManifest, visibleStartWeek, dataTotalWeeks);
     const rowContexts = [];
 
+    function syncRowAffordances() {
+      if (!boardWrap || !edgeControlsLayer) return;
+      const scrollTop = boardWrap.scrollTop;
+      const wrapHeight = boardWrap.clientHeight;
+      for (const rowContext of rowContexts) {
+        const top = rowContext.row.offsetTop - scrollTop;
+        const height = rowContext.row.offsetHeight;
+        const sideBar = rowContext.sideBar;
+        const insertBeforeControl = rowContext.insertBeforeControl;
+        const insertAfterControl = rowContext.insertAfterControl;
+
+        if (sideBar) {
+          sideBar.style.top = `${Math.round(top)}px`;
+          sideBar.style.height = `${Math.max(0, Math.round(height))}px`;
+          const isVisible = top + height >= 0 && top <= wrapHeight;
+          sideBar.classList.toggle("hidden", !isVisible);
+        }
+
+        if (insertBeforeControl) {
+          insertBeforeControl.style.top = `${Math.round(top - 9)}px`;
+          const isVisible = top + height >= -24 && top <= wrapHeight + 24;
+          const hiddenByIndex = insertBeforeControl.dataset.hiddenByIndex === "true";
+          insertBeforeControl.classList.toggle("hidden", !isVisible || hiddenByIndex);
+        }
+
+        if (insertAfterControl) {
+          insertAfterControl.style.top = `${Math.round(top + height - 9)}px`;
+          const isVisible = top + height >= -24 && top <= wrapHeight + 24;
+          const hiddenByIndex = insertAfterControl.dataset.hiddenByIndex === "true";
+          insertAfterControl.classList.toggle("hidden", !isVisible || hiddenByIndex);
+        }
+      }
+    }
+
+    function queueSyncRowAffordances() {
+      if (!boardWrap || !edgeControlsLayer) return;
+      if (appState.edgeControlsRaf) {
+        window.cancelAnimationFrame(appState.edgeControlsRaf);
+      }
+      appState.edgeControlsRaf = window.requestAnimationFrame(() => {
+        appState.edgeControlsRaf = 0;
+        syncRowAffordances();
+      });
+    }
+
     function relayoutRowContext(rowContext) {
       if (!rowContext) return;
       relayoutCardsLayer(rowContext.cardsLayer, rowContext.row);
+      queueSyncRowAffordances();
     }
 
     function updateRowContextIndexes() {
@@ -329,13 +379,14 @@ function render(data, options = {}) {
         const isLast = index === rowContexts.length - 1;
         if (rowContext.insertBeforeControl) {
           rowContext.insertBeforeControl.dataset.insertIndex = String(index);
-          rowContext.insertBeforeControl.classList.toggle("hidden", index === 0);
+          rowContext.insertBeforeControl.dataset.hiddenByIndex = index === 0 ? "true" : "false";
         }
         if (rowContext.insertAfterControl) {
           rowContext.insertAfterControl.dataset.insertIndex = String(index + 1);
-          rowContext.insertAfterControl.classList.toggle("hidden", !isLast);
+          rowContext.insertAfterControl.dataset.hiddenByIndex = !isLast ? "true" : "false";
         }
       });
+      queueSyncRowAffordances();
     }
 
     function moveRowContextToIndex(rowContext, targetIndex) {
@@ -430,7 +481,7 @@ function render(data, options = {}) {
         </span>
       `;
       sideBar.appendChild(dragHandle);
-      row.appendChild(sideBar);
+      if (edgeControlsLayer) edgeControlsLayer.appendChild(sideBar);
 
       const insertBeforeControl = document.createElement("button");
       insertBeforeControl.type = "button";
@@ -441,7 +492,7 @@ function render(data, options = {}) {
         const insertIndex = Math.floor(Number(insertBeforeControl.dataset.insertIndex || "0"));
         insertBlankRowAt(insertIndex);
       });
-      row.appendChild(insertBeforeControl);
+      if (edgeControlsLayer) edgeControlsLayer.appendChild(insertBeforeControl);
 
       const insertAfterControl = document.createElement("button");
       insertAfterControl.type = "button";
@@ -452,7 +503,36 @@ function render(data, options = {}) {
         const insertIndex = Math.floor(Number(insertAfterControl.dataset.insertIndex || String(rowContexts.length)));
         insertBlankRowAt(insertIndex);
       });
-      row.appendChild(insertAfterControl);
+      if (edgeControlsLayer) edgeControlsLayer.appendChild(insertAfterControl);
+
+      let affordanceDeactivateTimer = 0;
+      function setAffordanceActive(isActive) {
+        sideBar.classList.toggle("row-side-bar-active", isActive);
+        insertBeforeControl.classList.toggle("row-insert-visible", isActive);
+        insertAfterControl.classList.toggle("row-insert-visible", isActive);
+      }
+      function activateAffordance() {
+        if (affordanceDeactivateTimer) {
+          window.clearTimeout(affordanceDeactivateTimer);
+          affordanceDeactivateTimer = 0;
+        }
+        setAffordanceActive(true);
+      }
+      function deactivateAffordanceSoon() {
+        if (affordanceDeactivateTimer) window.clearTimeout(affordanceDeactivateTimer);
+        affordanceDeactivateTimer = window.setTimeout(() => {
+          affordanceDeactivateTimer = 0;
+          setAffordanceActive(false);
+        }, 40);
+      }
+      row.addEventListener("mouseenter", activateAffordance);
+      row.addEventListener("mouseleave", deactivateAffordanceSoon);
+      sideBar.addEventListener("mouseenter", activateAffordance);
+      sideBar.addEventListener("mouseleave", deactivateAffordanceSoon);
+      insertBeforeControl.addEventListener("mouseenter", activateAffordance);
+      insertBeforeControl.addEventListener("mouseleave", deactivateAffordanceSoon);
+      insertAfterControl.addEventListener("mouseenter", activateAffordance);
+      insertAfterControl.addEventListener("mouseleave", deactivateAffordanceSoon);
 
       function startRowDrag(clientY) {
         let moved = false;
@@ -516,6 +596,7 @@ function render(data, options = {}) {
 
       rowContext.insertBeforeControl = insertBeforeControl;
       rowContext.insertAfterControl = insertAfterControl;
+      rowContext.sideBar = sideBar;
 
       for (const t of track) {
         const prettyType = typeLabel[t.type] || t.type;
@@ -584,6 +665,15 @@ function render(data, options = {}) {
     }
     updateRowContextIndexes();
     updateRowInsertionAffordances();
+    if (boardWrap) {
+      boardWrap.onscroll = () => {
+        queueSyncRowAffordances();
+      };
+    }
+    window.onresize = () => {
+      queueSyncRowAffordances();
+    };
+    queueSyncRowAffordances();
     appState.rowContexts = rowContexts;
     appState.boardBounds = {
       visibleStartWeek,
@@ -661,6 +751,10 @@ function getBoardWrapElement() {
   return document.getElementById("board-wrap");
 }
 
+function getBoardEdgeControlsElement() {
+  return document.getElementById("board-edge-controls");
+}
+
 function getBoardLoadingElement() {
   return document.getElementById("board-loading");
 }
@@ -686,7 +780,7 @@ function maybeRevealBoard() {
 function setManifestStatus(message) {
   const statusEl = getManifestStatusElement();
   if (!statusEl) return;
-  statusEl.textContent = message;
+  statusEl.textContent = String(message || "");
 }
 
 function showToast(message, durationMs = 2200) {
@@ -999,7 +1093,8 @@ function renderVersionDashboard() {
       try {
         await loadSelectedManifest(entry.fileName);
       } catch (error) {
-        setManifestStatus(`Load failed: ${error.message}`);
+        const message = error instanceof Error ? error.message : "Failed to load selected version.";
+        showToast(`Load failed: ${message}`, 2800);
       }
     });
     actions.appendChild(loadButton);
@@ -1166,7 +1261,7 @@ async function loadSelectedManifest(selectedNameOverride = "") {
   updateManifestHistorySelect();
   renderVersionDashboard();
   setLastManifestLink(selectedName);
-  setManifestStatus(`Loaded manifest: ${selectedName}`);
+  showToast("Version loaded");
   markCurrentLayoutAsSaved();
 }
 
@@ -1193,7 +1288,7 @@ function resetLayoutToBaseline() {
   render(appState.baseData);
   updateManifestHistorySelect();
   renderVersionDashboard();
-  setManifestStatus("Layout reset to baseline board data.");
+  showToast("Layout reset");
   markCurrentLayoutAsSaved();
 }
 
@@ -1214,7 +1309,8 @@ function initManifestControls() {
     try {
       await saveManifestSnapshot();
     } catch (error) {
-      setManifestStatus(`Save failed: ${error.message}`);
+      const message = error instanceof Error ? error.message : "Failed to save version.";
+      showToast(`Save failed: ${message}`, 3200);
     } finally {
       saveBtn.removeAttribute("data-busy");
       saveBtn.setAttribute("aria-label", originalLabel);
@@ -1228,7 +1324,8 @@ function initManifestControls() {
       try {
         await loadSelectedManifest();
       } catch (error) {
-        setManifestStatus(`Load failed: ${error.message}`);
+        const message = error instanceof Error ? error.message : "Failed to load selected version.";
+        showToast(`Load failed: ${message}`, 2800);
       }
     });
   }
@@ -1249,7 +1346,8 @@ function initManifestControls() {
       setManifestStatus("");
       syncSaveStateFromCurrentLayout();
     } catch (error) {
-      setManifestStatus(`Failed to load saved versions: ${error.message}`);
+      const message = error instanceof Error ? error.message : "Failed to load saved versions.";
+      showToast(`Failed to load saved versions: ${message}`, 3200);
     }
   })();
   saveBtn.dataset.bound = "true";

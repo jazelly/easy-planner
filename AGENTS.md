@@ -2,6 +2,11 @@
 
 Quick guide for AI/dev agents to ramp up and ship safely in this repo.
 
+### Development tips (Important - must look first)
+
+1. Do not run `pnpm build` to verify the changes. This will disrupt running 
+dev session.
+
 ## 1) What this repo is
 
 - Next.js 15 + React 19 app-router project for a roadmap planning UI.

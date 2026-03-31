@@ -22,16 +22,16 @@ export default async function BoardPage({ params }: BoardPageProps) {
 
   return (
     <>
-      <div className="app">
-        <div className="topbar gap-4">
-          <div className="topbar-left">
+      <div className="app board-shell">
+        <div className="topbar board-shell-topbar gap-4">
+          <div className="topbar-left board-shell-title-region">
             <Button asChild variant="outline" size="sm" className="dashboard-back-btn">
               <Link href="/dashboard" aria-label="Exit to dashboard" title="Exit to dashboard">
                 <DoorOpen />
                 <span>Dashboard</span>
               </Link>
             </Button>
-            <div className="board-title-wrap">
+            <div className="board-title-wrap board-shell-name-wrap">
               <input
                 id="board-name-input"
                 className="board-name-input"
@@ -47,7 +47,7 @@ export default async function BoardPage({ params }: BoardPageProps) {
               </div>
             </div>
           </div>
-          <div className="topbar-actions">
+          <div className="topbar-actions board-shell-actions">
             <div className="toolbar-cluster">
               <Button
                 id="save-manifest-btn"
@@ -96,17 +96,18 @@ export default async function BoardPage({ params }: BoardPageProps) {
             </div>
           </div>
         </div>
-        <div className="manifest-toolbar">
+        <div className="manifest-toolbar board-shell-manifest">
           <span id="manifest-status" className="manifest-status"></span>
           <a id="manifest-last-link" className="manifest-link hidden" href="#" target="_blank" rel="noopener">
             Open last saved manifest
           </a>
         </div>
-        <div className="board-stage">
+        <div className="board-stage board-shell-stage">
           <div id="board-loading" className="board-loading" role="status" aria-live="polite">
             <span className="board-loading-spinner" aria-hidden="true"></span>
             <span className="board-loading-label">Loading board...</span>
           </div>
+          <div id="board-edge-controls" className="board-edge-controls" aria-hidden="true"></div>
           <div id="board-wrap" className="board-wrap board-wrap-loading" aria-busy="true">
             <div id="board" className="board"></div>
           </div>
